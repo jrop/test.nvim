@@ -1,0 +1,8 @@
+return {
+  include = {
+    'lua/test/init$',
+    'lua/test/assert$',
+    'lua/test/nvim$',
+  },
+  tick = true,
+}
