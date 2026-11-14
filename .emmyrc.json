@@ -7,7 +7,7 @@
     "version": "LuaJIT"
   },
   "workspace": {
-    "ignoreDir": [".prefix", "dist"],
+    "ignoreDir": ["dist"],
     "library": ["$VIMRUNTIME", "library/busted"]
   }
 }

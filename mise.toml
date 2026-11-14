@@ -11,21 +11,29 @@ gh = "2.103.3"
 cargo-binstall = "1.23.0"
 "cargo:emmylua_ls" = { version = "0.25.1", depends = ["cargo-binstall"] }
 "cargo:emmylua_check" = { version = "0.25.1", depends = ["cargo-binstall"] }
-"github:jrop/nvim-bundle" = "0.2.0"
+"github:jrop/nvim-bundle" = "0.4.0"
 
 ################################################################################
 # Env
 ################################################################################
 
 [env]
-_.source = { path = "./scripts/env.sh", tools = true }
+# busted runs its specs under `nvim -l` (see .busted), so Neovim's LuaJIT finds
+# busted and luassert only through LUA_PATH and LUA_CPATH. The trailing `;;`
+# keeps Lua's default search paths after the luarocks trees.
+LUA_PATH = { value = "{{ exec(command='luarocks path --lr-path') }};;", tools = true }
+LUA_CPATH = { value = "{{ exec(command='luarocks path --lr-cpath') }};;", tools = true }
+# .emmyrc.json loads Neovim's runtime as a type library through $VIMRUNTIME. An
+# editor sets it for its language server, but a shell running `emmylua_check`
+# does not.
+VIMRUNTIME = { value = "{{ exec(command='nvim --clean --headless +\"lua io.stdout:write(vim.env.VIMRUNTIME)\" +qa') }}", tools = true }
 
 ################################################################################
 # Tasks
 ################################################################################
 
 [tasks]
-lint = "emmylua_check --warnings-as-errors --ignore '.prefix/**/*.*' ."
+lint = "emmylua_check --warnings-as-errors ."
 fmt = "stylua ."
 "fmt:check" = "stylua --check ."
 
@@ -71,16 +79,11 @@ test -z "$(git status --porcelain)" || {
 
 mise run ci
 
-# nvim-bundle defaults to `lua/` in and `dist/test.lua` out. The bundler
-# inlines `test`, `test.nvim`, and `test.assert`, so the checkout's separate
-# sources are not published alongside it.
-nvim-bundle test
-
-# Load the artifact the way a consumer will, so a bundle that does not parse or
-# whose entry is incomplete fails here rather than after publication.
-nvim --clean --headless \
-  +"lua local b = dofile('dist/test.lua'); local t = b['test'](); assert(type(t.with_buf) == 'function', 'test.with_buf missing'); assert(type(t.Nvim.start) == 'function', 'test.nvim missing'); assert(type(b['test.assert']().deep_equal) == 'function', 'test.assert missing')" \
-  +'qa!'
+# nvim-bundle defaults to `lua/` in and `dist/test.lua` out. Naming `test` as
+# the entry makes the bundle return that module, which is the library's whole
+# public surface, so the other modules under `lua/test/` are inlined, not
+# published.
+nvim-bundle build test
 
 # Hash from inside dist so the checksum names `test.lua`.
 (cd dist && shasum -a 256 test.lua > test.lua.sha256)

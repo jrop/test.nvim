@@ -4,13 +4,27 @@
 
 Shared test helpers for Neovim plugin specs:
 
-- **`lua/test/assert.lua`** — `diff` (a self-contained Levenshtein line diff) and
-  `deep_equal`.
 - **`lua/test/nvim.lua`** — child-Neovim RPC harness. `Nvim.start` spawns
   `nvim --headless --embed -n -u NORC`; the handle supports `request`, `notify`,
-  `run`, `run_async`, `input`, `screen`, `assert_screenshot`, `drain`,
-  `wait_until`, and `stop`.
-- **`lua/test/init.lua`** — `with_buf`, a host-side temporary-window fixture.
+  `run`, `run_async` (which returns a `test.Pending` with `wait` and
+  `on_settled`), `input`, `screen`, `drain`, `wait_until`, and `stop`.
+- **`lua/test/assert.lua`** — Node-style assertions in one callable namespace:
+  `ok`, `is_nil`, `equal`, `not_equal`, `deep_equal`, `not_deep_equal`,
+  `contains`, `matches`, and `raises`. Every failure prints the shortest line
+  diff of two values, built from a Levenshtein table without replacement.
+- **`lua/test/init.lua`** — the library's one public surface,
+  `{ Nvim, assert }`.
+- **`docs/`** — user documentation in the four Diátaxis forms: `tutorial.md`,
+  `how-to.md`, `reference.md`, and `explanation.md`. `README.md` is a landing
+  page that links to them. Keep each document to its one job: steps a learner
+  can follow in the tutorial, tasks in the how-to guides, facts in the
+  reference, and reasons in the explanation. A change to the API updates the
+  reference, and every other document that shows the changed call.
+
+Consumers reach every helper through `require 'test'`. The release bundle
+(`nvim-bundle build test`) returns only that module, so the other files are
+implementation; a new public helper must be exported from `init.lua`, and
+`spec/api_spec.lua` lists the surface.
 
 The modules come from the `_test` directories of tuis.nvim and morph.nvim. Those
 copies still exist and are still canonical for those plugins. This repository is
@@ -21,8 +35,8 @@ The repository is a library, not a plugin; it is meant to be vendored. It must
 not require tuis.nvim or morph.nvim, and it must not know a plugin's data shapes.
 A helper whose parameters name a plugin's data (a morph element, a tag, an
 `{ id, text }` event, a buffer watcher) belongs in that plugin's `_test`
-directory. `wait_until` and `run` are the general primitives those helpers are
-built from.
+directory. `run`, `wait_until`, and `assert.deep_equal` are the general
+primitives those helpers are built from.
 
 ## Commands
 
@@ -35,6 +49,11 @@ All tasks use `mise`:
 - `mise run test:coverage` — test with luacov
 - `mise run ci` — `fmt:check` → `lint` → `test`
 
+`mise.toml`'s `[env]` sets the environment these tasks need: `LUA_PATH` and
+`LUA_CPATH` from `luarocks path`, so busted's `nvim -l` runner finds busted and
+luassert, and `VIMRUNTIME`, which `.emmyrc.json` loads as a type library.
+`mise exec` sets the same variables.
+
 Run one spec directly after preparing the test dependencies:
 
 ```sh
@@ -44,19 +63,26 @@ mise exec -- busted spec/nvim_spec.lua
 
 ## Architecture
 
-- **`lua/test/assert.lua`** — deep equality and a line diff; the diff builds one
-  Levenshtein DP table and walks it back in `edit_ops`.
 - **`lua/test/nvim.lua`** — child process lifecycle, RPC wrappers, synchronous
-  `run` and asynchronous `run_async`, screen capture, screenshot assertions,
-  scheduled-work `drain`, and predicate polling with `wait_until`.
-- **`lua/test/init.lua`** — `with_buf`, the host-side temporary-window fixture.
-- **`spec/assert_spec.lua`** — insertion, deletion, replacement, deep equality,
-  and mismatch output.
-- **`spec/init_spec.lua`** — temporary-buffer cleanup, initial lines, and
-  swapfile isolation.
-- **`spec/nvim_spec.lua`** — child start/stop, sync and async runs, input, screen
-  dimensions, screenshot matching and mismatch, drain, and `wait_until` success
-  and timeout.
+  `run`, asynchronous `run_async` and its `test.Pending` result, screen
+  capture, scheduled-work `drain` (an async job), and predicate polling with
+  `wait_until`. Waits raise on timeout rather than returning false.
+- **`lua/test/assert.lua`** — the assertions and their private line diff. Every
+  failure goes through one `fail(name, msg, note, got, want)`, so each prints a
+  header, a note, and a diff of two values. The diff builds a Levenshtein
+  table without replacement, over suffixes, and walks it forward. Strings and
+  lists of strings print one quoted entry per line, because `vim.inspect`
+  prints a list on one line.
+- **`lua/test/init.lua`** — the public surface.
+- **`spec/helper.lua`** — busted helper that saves luacov stats at exit.
+- **`spec/api_spec.lua`** — the exported names of `test`, `test.assert`, and
+  `test.Nvim`.
+- **`spec/assert_spec.lua`** — each assertion's pass and fail cases, failure
+  output (including the diff's insertion, deletion, replacement, and
+  shortest-diff choice), and the error level that names the spec's line.
+- **`spec/nvim_spec.lua`** — child start/stop and `env`, sync runs, async jobs
+  (`wait`, concurrency, errors, timeout, `on_settled`), input, screen, drain,
+  and `wait_until` success and timeout.
 - **`library/busted`** — a git submodule of LuaCATS/busted, providing busted type
   stubs for the Lua language server (stylua-ignored). Initialize it after cloning
   with `git submodule update --init --recursive`.
@@ -82,7 +108,11 @@ Two rules follow from the RPC boundary:
 - Stylua: single quotes, no call parentheses for simple statements, 2-space
   indent, 100-column width, sorted requires.
 - `run` is synchronous and returns the function's result. `run_async` passes the
-  function a `done` callback and reports to `on_done` in the host.
+  function a `done` callback and returns a `test.Pending`; `wait` blocks for the
+  value, and `on_settled` calls back without blocking. The child reports with
+  `vim.rpcnotify`, and an error raised before `done` settles the job.
+- The library's own specs check it with busted's `assert`, not `test.assert`, so
+  a bug in the assertions cannot hide itself.
 - `wait_until` polls a child-side predicate and issues one RPC round trip per
   attempt, because the round trip — not an in-child wait — is the child's
   event-loop flush point. The predicate belongs to the caller, so plugin

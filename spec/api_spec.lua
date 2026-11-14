@@ -1,7 +1,5 @@
 --- @diagnostic disable: undefined-field
 
-local Assert = require 'test.assert'
-local Nvim = require 'test.nvim'
 local Test = require 'test'
 
 --- Sorted public names. `__index` is the class table's metatable hook, not a
@@ -18,23 +16,36 @@ local function api_names(t)
 end
 
 describe('public API', function()
-  it('exports the facade surface', function()
-    assert.are.same({ 'Nvim', 'assert', 'with_buf' }, api_names(Test))
-    assert.are.same(Nvim, Test.Nvim)
-    assert.are.same(Assert, Test.assert)
-    assert.are.same('function', type(Test.with_buf))
-  end)
+  -- A bundle returns only the `test` module, so these lists are everything a
+  -- vendored consumer can reach.
+  it(
+    'exports Nvim and assert from the one entry module',
+    function() assert.are.same({ 'Nvim', 'assert' }, api_names(Test)) end
+  )
 
-  it('exports the assert surface', function()
-    assert.are.same({ 'deep_equal', 'diff' }, api_names(Assert))
-    assert.are.same('function', type(Assert.diff))
-    assert.are.same('function', type(Assert.deep_equal))
+  it('exports the assertions, and the namespace is callable', function()
+    local names = api_names(Test.assert)
+    assert.are.same({
+      'contains',
+      'deep_equal',
+      'equal',
+      'is_nil',
+      'matches',
+      'not_deep_equal',
+      'not_equal',
+      'ok',
+      'raises',
+    }, names)
+    for _, name in ipairs(names) do
+      assert.are.same('function', type(Test.assert[name]), name)
+    end
+    assert.are.same('function', type(getmetatable(Test.assert).__call))
   end)
 
   it('exports the Nvim class surface', function()
+    local Nvim = Test.Nvim
     local public = api_names(Nvim)
     assert.are.same({
-      'assert_screenshot',
       'drain',
       'input',
       'notify',

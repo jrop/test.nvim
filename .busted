@@ -2,6 +2,7 @@ return {
   _all = {
     lpath = "lua/?.lua;lua/?/init.lua",
     lua = "nvim -u NONE -i NONE -l",
+    helper = "spec/helper.lua",
   },
   default = {
     verbose = true

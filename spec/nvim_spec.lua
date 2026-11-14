@@ -1,9 +1,9 @@
 --- @diagnostic disable: undefined-field
 --- @diagnostic disable: global-in-non-module
 
-local Nvim = require 'test.nvim'
+local Nvim = require('test').Nvim
 
-describe('test.nvim', function()
+describe('test.Nvim', function()
   local nv --- @type test.Nvim
 
   before_each(function() nv = Nvim.start { columns = 40, rows = 12 } end)
@@ -14,6 +14,12 @@ describe('test.nvim', function()
     assert.are.same(42, nv:run(function() return 40 + 2 end))
   end)
 
+  it('returns a nil result as vim.NIL, which is_nil accepts', function()
+    local result = nv:run(function() return nil end)
+    assert.are.same(vim.NIL, result)
+    require('test').assert.is_nil(result)
+  end)
+
   it('passes arguments to the child function', function()
     local result = nv:run(function(...)
       local a, b = ...
@@ -22,13 +28,87 @@ describe('test.nvim', function()
     assert.are.same('xy', result)
   end)
 
-  it('runs an async child function', function()
-    local result
-    nv:run_async(function(done)
-      vim.schedule(function() done 'finished' end)
-    end, function(value) result = value end)
-    assert.is_true(vim.wait(1000, function() return result ~= nil end))
-    assert.are.same('finished', result)
+  it('adds env to the child environment', function()
+    local child = Nvim.start { env = { TEST_NVIM_SPEC = 'set' } }
+    local value = child:run(function() return vim.env.TEST_NVIM_SPEC end)
+    child:stop()
+    assert.are.same('set', value)
+  end)
+
+  describe('run_async', function()
+    it('returns a pending result that wait blocks on', function()
+      local pending = nv:run_async(function(done)
+        vim.schedule(function() done 'finished' end)
+      end)
+      assert.are.same('finished', pending:wait())
+    end)
+
+    it('runs several jobs concurrently', function()
+      local a = nv:run_async(function(done)
+        vim.defer_fn(function() done 'a' end, 50)
+      end)
+      local b = nv:run_async(function(done)
+        vim.defer_fn(function() done 'b' end, 50)
+      end)
+      local started = vim.uv.now()
+      assert.are.same({ 'a', 'b' }, { a:wait(), b:wait() })
+      assert.is_true(vim.uv.now() - started < 95, 'the jobs ran one after another')
+    end)
+
+    it('reports a job error from wait', function()
+      local pending = nv:run_async(function() error 'job broke' end)
+      local ok, err = pcall(pending.wait, pending)
+      assert.is_false(ok)
+      assert.is_truthy(tostring(err):find('job broke', 1, true))
+    end)
+
+    it('raises when the job never settles', function()
+      local pending = nv:run_async(function() end)
+      local ok, err = pcall(pending.wait, pending, 50)
+      assert.is_false(ok)
+      assert.is_truthy(tostring(err):find('no result after 50 ms', 1, true))
+    end)
+
+    it('keeps the first result when done is called twice', function()
+      local pending = nv:run_async(function(done)
+        done 'first'
+        done 'second'
+      end)
+      assert.are.same('first', pending:wait())
+      nv:drain()
+      vim.wait(20)
+      assert.are.same('first', pending:wait())
+    end)
+
+    it('calls on_settled without blocking', function()
+      local seen
+      nv:run_async(function(done)
+        vim.schedule(function() done 'later' end)
+      end):on_settled(function(ok, value) seen = { ok, value } end)
+      assert.is_nil(seen)
+      assert.is_true(vim.wait(1000, function() return seen ~= nil end))
+      assert.are.same({ true, 'later' }, seen)
+    end)
+
+    it('passes a job error to on_settled', function()
+      local seen
+      nv:run_async(function() error 'job broke' end)
+        :on_settled(function(ok, value) seen = { ok, tostring(value) } end)
+      assert.is_true(vim.wait(1000, function() return seen ~= nil end))
+      --- @cast seen [boolean, string]
+      assert.is_false(seen[1])
+      assert.is_truthy(seen[2]:find('job broke', 1, true))
+    end)
+
+    it('calls on_settled on a later tick for a settled job', function()
+      local pending = nv:run_async(function(done) done 'now' end)
+      pending:wait()
+      local seen
+      pending:on_settled(function(_, value) seen = value end)
+      assert.is_nil(seen)
+      assert.is_true(vim.wait(1000, function() return seen ~= nil end))
+      assert.are.same('now', seen)
+    end)
   end)
 
   it('types keys into the child', function()
@@ -37,23 +117,10 @@ describe('test.nvim', function()
     assert.are.same({ 'hello' }, lines)
   end)
 
-  it('captures the screen and matches a screenshot', function()
+  it('captures the screen as one string per row', function()
     local screen = nv:screen()
-    assert.are.same(40, screen.columns)
-    assert.are.same(12, screen.rows)
-    assert.are.same(12, #screen.lines)
-    nv:assert_screenshot(screen.lines)
-  end)
-
-  it('reports a screenshot mismatch with a diff', function()
-    local expected = nv:screen().lines
-    expected[1] = expected[1] .. ' wrong'
-    local ok, err = pcall(nv.assert_screenshot, nv, expected)
-    assert.is_false(ok)
-    --- @cast err string
-    assert.is_truthy(err:find('screenshot mismatch', 1, true))
-    assert.is_truthy(err:find('\n- ', 1, true))
-    assert.is_truthy(err:find('\n+ ', 1, true))
+    assert.are.same(12, #screen)
+    assert.are.same(40, #screen[1])
   end)
 
   it('drains scheduled child work', function()
@@ -70,11 +137,13 @@ describe('test.nvim', function()
       _G.ticks = 0
       vim.schedule(function() _G.ticks = 1 end)
     end)
-    assert.is_true(nv:wait_until(function() return _G.ticks == 1 end))
+    nv:wait_until(function() return _G.ticks == 1 end)
   end)
 
-  it('gives up on a predicate that never holds', function()
-    assert.is_false(nv:wait_until(function() return false end, 50))
+  it('raises when a predicate never holds', function()
+    local ok, err = pcall(nv.wait_until, nv, function() return false end, 50, 'never ready')
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find('never ready', 1, true))
   end)
 
   it('can notify and request', function()

@@ -1,7 +1,5 @@
 ---@diagnostic disable: global-in-non-module
 
-local Assert = require 'test.assert'
-
 --- Nvim remote-control helper.
 --- Spawns a child `nvim --headless --embed` with RPC on stdio,
 --- drives it via msgpack-RPC, and snapshots the screen grid.
@@ -11,28 +9,26 @@ local Assert = require 'test.assert'
 --- `TextChangedI` autocmds fire naturally from real input, and programmatic
 --- `:startinsert` genuinely enters insert mode. The mode change (and any
 --- scheduled work) is only observable across an RPC round-trip (a later `run`/
---- `request`), NOT within the same `run` that issued it — the round-trip is the
+--- `request`), NOT within the same `run` that issued it - the round-trip is the
 --- event-loop flush point. See AGENTS.md's "Test environment" section for the
 --- full host/child distinction.
 
---- @class test.Screen
---- @field lines string[]      composited screen grid, one string per row (full TUI screenshot)
---- @field rows integer        grid height (vim.o.lines)
---- @field columns integer     grid width (vim.o.columns)
-
 --- @class test.Nvim
---- @field jobid integer
---- @field chan integer
+--- @field chan integer  the job id, which `rpc = true` also makes the channel id
 local Nvim = {}
 Nvim.__index = Nvim
 
---- @param opts? { columns?: integer, rows?: integer, rtp?: string }
---- @return test.Nvim  handle with :stop(), :request(method, ...), :notify(...), :screen()
+--- @class test.NvimStartOpts
+--- @field columns? integer
+--- @field rows? integer
+--- @field rtp? string  appended to the child's runtimepath (default: the cwd)
+--- @field env? table<string, string>  added to the child's environment
+
+--- @param opts? test.NvimStartOpts
+--- @return test.Nvim
 function Nvim.start(opts)
   opts = opts or {}
-  --- @cast opts { columns?: integer, rows?: integer, rtp?: string }
-  --- @type test.Nvim
-  local self = setmetatable({}, Nvim)
+  --- @cast opts test.NvimStartOpts
 
   --- @type string[]
   local argv = { vim.v.argv[1], '--headless', '--embed', '-n', '-u', 'NORC' }
@@ -41,26 +37,15 @@ function Nvim.start(opts)
   end
   if opts.rows then vim.list_extend(argv, { '--cmd', ('set lines=%d'):format(opts.rows) }) end
 
-  local jobid = vim.fn.jobstart(argv, {
-    rpc = true,
-    -- Plugins read NVIM_TEST to disable debounce and timers in the child.
-    -- Unset it inside the child when a spec needs the production timing path.
-    env = { NVIM_TEST = 'true' },
-  })
-  if jobid <= 0 then error('jobstart failed: ' .. jobid, 2) end
-  self.jobid = jobid
-  -- With rpc=true the job-id IS the channel-id.
-  self.chan = jobid
+  local chan = vim.fn.jobstart(argv, { rpc = true, env = opts.env })
+  if chan <= 0 then error('jobstart failed: ' .. chan, 2) end
+  local self = setmetatable({ chan = chan }, Nvim)
 
   -- Wait for readiness: retry nvim_get_api_info up to ~1s.
   if
-    not vim.wait(
-      1000,
-      function() return pcall(vim.rpcrequest, self.chan, 'nvim_get_api_info') end,
-      10
-    )
+    not vim.wait(1000, function() return pcall(vim.rpcrequest, chan, 'nvim_get_api_info') end, 10)
   then
-    vim.fn.jobstop(jobid)
+    vim.fn.jobstop(chan)
     error('child nvim never became ready', 2)
   end
 
@@ -80,7 +65,7 @@ function Nvim:request(method, ...) return vim.rpcrequest(self.chan, method, ...)
 function Nvim:notify(method, ...) vim.rpcnotify(self.chan, method, ...) end
 
 --- Run a function inside the child and return its result.
---- The function is serialized via `string.dump` — upvalues are NOT preserved,
+--- The function is serialized via `string.dump` - upvalues are NOT preserved,
 --- so pass the data it needs as arguments.
 --- @param f fun(...): any
 --- @param ... any  arguments forwarded to `f`
@@ -93,53 +78,125 @@ function Nvim:run(f, ...)
   )
 end
 
---- Run a function inside the child without blocking the host.
---- The function receives a `done` callback; calling `done(results)` runs
---- `on_done(results)` in the host. The function is `string.dump`'d, so it
---- cannot capture upvalues — use child globals for state it must read.
---- @param f fun(done: fun(results: any))
---- @param on_done fun(results: any)
-function Nvim:run_async(f, on_done)
-  assert(
-    type(on_done) == 'function',
-    ('run_async: on_done must be a function, got %s'):format(type(on_done))
-  )
+--------------------------------------------------------------------------------
+-- Async jobs
+--------------------------------------------------------------------------------
 
-  _G.__test_nvim_async_cb_registry = _G.__test_nvim_async_cb_registry or {}
-  _G.__test_nvim_async_cb_counter = (_G.__test_nvim_async_cb_counter or 0) + 1
-  local cb_id = _G.__test_nvim_async_cb_counter
-  _G.__test_nvim_async_cb_registry[cb_id] = function(results)
-    _G.__test_nvim_async_cb_registry[cb_id] = nil
-    on_done(results)
+--- The result of one `run_async` job: the value passed to `done`, or the error
+--- the job raised. It is settled at most once.
+--- @class test.Pending
+--- @field settled boolean
+--- @field ok boolean?  false when the job raised
+--- @field value any  the value passed to `done`, or the job's error
+--- @field listeners fun(ok: boolean, value: any)[]
+local Pending = {}
+Pending.__index = Pending
+
+-- The child reports back by running a Lua string in the host. That string sees
+-- only host globals, because a bundled module cannot be reached by `require`,
+-- so open jobs live in one global table keyed by id.
+_G.__test_nvim_pending = _G.__test_nvim_pending or {}
+local next_id = 0
+
+--- Only the first result counts, because a second `done` must not change a
+--- value the host may already have read.
+--- @param ok boolean
+--- @param value any
+function Pending:settle(ok, value)
+  if self.settled then return end
+  self.settled, self.ok, self.value = true, ok, value
+  for _, cb in ipairs(self.listeners) do
+    cb(ok, value)
   end
+  self.listeners = {}
+end
+
+--- Block until the job settles, and return its value. Raises when the job
+--- raised, or when it has not settled after `timeout_ms` (default 2000).
+--- @param timeout_ms? integer
+--- @return any
+function Pending:wait(timeout_ms)
+  timeout_ms = timeout_ms or 2000
+  if not vim.wait(timeout_ms, function() return self.settled end, 1) then
+    error(('run_async: no result after %d ms'):format(timeout_ms), 2)
+  end
+  if not self.ok then error('run_async: the child raised: ' .. tostring(self.value), 2) end
+  return self.value
+end
+
+--- Call `cb(ok, value)` once the job settles, without blocking. `ok` is false
+--- when the job raised, and `value` is then its error. The host handles the
+--- child's result only while its own event loop runs, i.e., inside some
+--- `vim.wait`. An error raised by `cb` surfaces in that RPC handler, not in the
+--- spec, so `cb` should record what it saw and leave assertions to the spec.
+--- @param cb fun(ok: boolean, value: any)
+function Pending:on_settled(cb)
+  -- A job that already settled still calls back on a later tick, so `cb`
+  -- never runs before the line after `on_settled`, whichever finished first.
+  if self.settled then
+    vim.schedule(function()
+      cb(self.ok --[[@as boolean]], self.value)
+    end)
+    return
+  end
+  table.insert(self.listeners, cb)
+end
+
+--- Start a function inside the child without blocking the host, and return
+--- its pending result. The function receives a `done` callback; the value
+--- passed to `done` settles the result, and so does an error raised before it.
+--- The function is `string.dump`'d, so it cannot capture upvalues - use child
+--- globals for state it must read.
+--- @param f fun(done: fun(value?: any))
+--- @return test.Pending
+function Nvim:run_async(f)
+  next_id = next_id + 1
+  local id = next_id
+  local pending = setmetatable({ settled = false, listeners = {} }, Pending)
+  _G.__test_nvim_pending[id] = pending
 
   self:notify(
     'nvim_exec_lua',
     [[
-      local code, cb_id = ...
-      local fn = assert(loadstring(code))
-      fn(function(results)
-        vim.rpcrequest(
-          1,
-          'nvim_exec_lua',
-          '_G.__test_nvim_async_cb_registry[' .. tostring(cb_id) .. '](...)',
-          { results }
-        )
+      local code, id = ...
+      -- A notification, not a request, so the child never blocks on a host
+      -- that is itself blocked.
+      local function settle(ok, value)
+        vim.rpcnotify(1, 'nvim_exec_lua', [=[
+          local id, ok, value = ...
+          local pending = _G.__test_nvim_pending[id]
+          _G.__test_nvim_pending[id] = nil
+          if pending then pending:settle(ok, value) end
+        ]=], { id, ok, value })
+      end
+      -- An error raised before `done` becomes the job's result, so the host
+      -- sees it instead of a silent timeout.
+      local ok, err = pcall(function()
+        assert(loadstring(code))(function(value) settle(true, value) end)
       end)
+      if not ok then settle(false, err) end
     ]],
-    { string.dump(f), cb_id }
+    { string.dump(f), id }
   )
+
+  return pending
 end
 
+--------------------------------------------------------------------------------
+-- Input, screen, and waiting
+--------------------------------------------------------------------------------
+
 --- Type keys into the child nvim, auto-translating key-notation.
---- Simpler than feedkeys: no mode, no escape_ks — just virtual typing.
+--- Simpler than feedkeys: no mode, no escape_ks - just virtual typing.
 --- @param keys string  key notation (e.g. "ihello\<Esc>")
 function Nvim:input(keys)
   local translated = self:request('nvim_replace_termcodes', keys, true, true, true)
   return self:request('nvim_input', translated)
 end
 
---- @return test.Screen
+--- Read the rendered grid, one string per row, status and command lines
+--- included.
+--- @return string[]
 function Nvim:screen()
   return self:run(function()
     vim.cmd 'redraw!'
@@ -147,66 +204,43 @@ function Nvim:screen()
     for r = 1, vim.o.lines do
       local row = {}
       for c = 1, vim.o.columns do
-        row[c] = vim.fn.screenstring(r, c) or ' '
+        row[c] = vim.fn.screenstring(r, c)
       end
       lines[r] = table.concat(row)
     end
-    return {
-      lines = lines,
-      rows = vim.o.lines,
-      columns = vim.o.columns,
-    }
-  end) --[[@as test.Screen]]
+    return lines
+  end) --[[@as string[] ]]
 end
 
---- Flush scheduled work in the child.
----
---- The work being flushed is `vim.schedule`'d, and scheduled callbacks run in
---- FIFO order, so queueing a sentinel after it and waiting on the sentinel
---- releases as soon as the queue drains instead of after a fixed sleep. `ms` is
---- only a safety cap, passed as an argument because the closure cannot capture
---- upvalues.
---- @param ms? integer  safety cap (default 1000)
-function Nvim:drain(ms)
-  self:run(function(...)
-    local cap = ... --- @type integer?
-    local done = false
-    vim.schedule(function() done = true end)
-    vim.wait(cap or 1000, function() return done end, 1)
-  end, ms)
+--- Wait until the work already queued with `vim.schedule` in the child has
+--- run. Scheduled callbacks run in order, so a `done` scheduled now fires only
+--- after that work. Raises after `timeout_ms` (default 2000).
+--- @param timeout_ms? integer
+function Nvim:drain(timeout_ms)
+  self:run_async(function(done) vim.schedule(done) end):wait(timeout_ms)
 end
 
---- Poll a child-side predicate until it returns true.
+--- Poll a child-side predicate until it returns true, and raise with `msg`
+--- once `timeout_ms` (default 2000) passes.
 ---
---- Each attempt is its own RPC round trip, because the round trip — not an
---- in-child wait — is what lets the child's event loop dispatch pending work:
+--- Each attempt is its own RPC round trip, because the round trip - not an
+--- in-child wait - is what lets the child's event loop dispatch pending work:
 --- on some versions a single request's in-child wait never reaches that
 --- checkpoint. `pred` is `string.dump`'d, so it cannot capture upvalues.
 --- @param pred fun(): boolean
---- @param timeout_ms? integer  give up after this many milliseconds (default 2000)
---- @return boolean  true once `pred` returned true
-function Nvim:wait_until(pred, timeout_ms)
-  local deadline = vim.uv.now() + (timeout_ms or 2000)
+--- @param timeout_ms? integer
+--- @param msg? string
+function Nvim:wait_until(pred, timeout_ms, msg)
+  timeout_ms = timeout_ms or 2000
+  local deadline = vim.uv.now() + timeout_ms
   repeat
-    if self:run(pred) then return true end
+    if self:run(pred) then return end
     vim.wait(10)
   until vim.uv.now() >= deadline
-  return false
-end
-
---- Capture the child's screen and assert it matches `expected` line for line.
---- On mismatch, raises with a line diff.
---- @param expected string[]  expected screen lines
---- @param msg? string  assertion label
-function Nvim:assert_screenshot(expected, msg)
-  local got = self:screen().lines
-  if vim.deep_equal(got, expected) then return end
-  local got_lines = vim.tbl_map(vim.inspect, got) --- @type string[]
-  local want_lines = vim.tbl_map(vim.inspect, expected) --- @type string[]
-  error((msg or 'screenshot mismatch') .. '\n' .. Assert.diff(got_lines, want_lines), 2)
+  error(msg or ('wait_until: the predicate did not hold within %d ms'):format(timeout_ms), 2)
 end
 
 --- Stop the child. Safe to call more than once.
-function Nvim:stop() vim.fn.jobstop(self.jobid) end
+function Nvim:stop() vim.fn.jobstop(self.chan) end
 
 return Nvim
