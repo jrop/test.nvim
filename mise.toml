@@ -2,16 +2,31 @@
 ## Tools
 ################################################################################
 
+# Both emmylua tools ship in one GitHub release, and mise lists each repository
+# once, so an alias gives each tool its own name and install directory.
+[tool_alias]
+emmylua_check = "github:EmmyLuaLs/emmylua-analyzer-rust"
+emmylua_ls = "github:EmmyLuaLs/emmylua-analyzer-rust"
+
 [tools]
 "asdf:mise-plugins/mise-lua" = { version = "5.1.5", install_env = { ASDF_LUA_LUAROCKS_VERSION = "3.12.2" } }
 neovim = "0.12.5"
 stylua = "2.5.2"
-# `mise run release` publishes through the gh CLI:
-gh = "2.103.3"
-cargo-binstall = "1.23.0"
-"cargo:emmylua_ls" = { version = "0.25.1", depends = ["cargo-binstall"] }
-"cargo:emmylua_check" = { version = "0.25.1", depends = ["cargo-binstall"] }
 "github:jrop/nvim-bundle" = "0.4.0"
+
+[tools.emmylua_check]
+version = "0.25.1"
+bin = "emmylua_check"
+platforms.linux-x64 = { asset_pattern = "emmylua_check-linux-x64.tar.gz" }
+platforms.macos-arm64 = { asset_pattern = "emmylua_check-darwin-arm64.tar.gz" }
+platforms.macos-x64 = { asset_pattern = "emmylua_check-darwin-x64.tar.gz" }
+
+[tools.emmylua_ls]
+version = "0.25.1"
+bin = "emmylua_ls"
+platforms.linux-x64 = { asset_pattern = "emmylua_ls-linux-x64.tar.gz" }
+platforms.macos-arm64 = { asset_pattern = "emmylua_ls-darwin-arm64.tar.gz" }
+platforms.macos-x64 = { asset_pattern = "emmylua_ls-darwin-x64.tar.gz" }
 
 ################################################################################
 # Env
@@ -58,39 +73,4 @@ run = '''
 mise run fmt:check
 mise run lint
 mise run test
-'''
-
-[tasks.release]
-description = "Publish the current v* tag as a GitHub release"
-run = '''
-set -eu
-
-# `--exact-match` refuses a commit that is not itself tagged.
-tag="$(git describe --tags --exact-match --match 'v*' HEAD 2>/dev/null)" || {
-  echo "release: HEAD must be at a v* tag" >&2
-  exit 1
-}
-
-git submodule update --init --recursive
-test -z "$(git status --porcelain)" || {
-  echo "release: working tree is not clean" >&2
-  exit 1
-}
-
-mise run ci
-
-# nvim-bundle defaults to `lua/` in and `dist/test.lua` out. Naming `test` as
-# the entry makes the bundle return that module, which is the library's whole
-# public surface, so the other modules under `lua/test/` are inlined, not
-# published.
-nvim-bundle build test
-
-# Hash from inside dist so the checksum names `test.lua`.
-(cd dist && shasum -a 256 test.lua > test.lua.sha256)
-
-gh release create "$tag" \
-  dist/test.lua \
-  dist/test.lua.sha256 \
-  --generate-notes \
-  --verify-tag
 '''
