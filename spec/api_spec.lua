@@ -1,6 +1,6 @@
---- @diagnostic disable: undefined-field
-
 local Test = require 'test'
+local describe, it = Test.describe, Test.it
+local assert = Test.assert
 
 --- Sorted public names. `__index` is the class table's metatable hook, not a
 --- name the harness exposes.
@@ -19,13 +19,25 @@ describe('public API', function()
   -- A bundle returns only the `test` module, so these lists are everything a
   -- vendored consumer can reach.
   it(
-    'exports Nvim and assert from the one entry module',
-    function() assert.are.same({ 'Nvim', 'assert' }, api_names(Test)) end
+    'exports the harness, the assertions, and the spec API from one module',
+    function()
+      assert.deep_equal(api_names(Test), {
+        'Nvim',
+        'after_all',
+        'after_each',
+        'assert',
+        'before_all',
+        'before_each',
+        'describe',
+        'it',
+        'pending',
+      })
+    end
   )
 
   it('exports the assertions, and the namespace is callable', function()
-    local names = api_names(Test.assert)
-    assert.are.same({
+    local names = api_names(assert)
+    assert.deep_equal(names, {
       'contains',
       'deep_equal',
       'equal',
@@ -35,17 +47,17 @@ describe('public API', function()
       'not_equal',
       'ok',
       'raises',
-    }, names)
+    })
     for _, name in ipairs(names) do
-      assert.are.same('function', type(Test.assert[name]), name)
+      assert.deep_equal(type(assert[name]), 'function', name)
     end
-    assert.are.same('function', type(getmetatable(Test.assert).__call))
+    assert.deep_equal(type(getmetatable(assert).__call), 'function')
   end)
 
   it('exports the Nvim class surface', function()
     local Nvim = Test.Nvim
     local public = api_names(Nvim)
-    assert.are.same({
+    assert.deep_equal(public, {
       'drain',
       'input',
       'notify',
@@ -56,10 +68,10 @@ describe('public API', function()
       'start',
       'stop',
       'wait_until',
-    }, public)
-    assert.are.same(Nvim, Nvim.__index)
+    })
+    assert.deep_equal(Nvim.__index, Nvim)
     for _, name in ipairs(public) do
-      assert.are.same('function', type(Nvim[name]), name)
+      assert.deep_equal(type(Nvim[name]), 'function', name)
     end
   end)
 end)

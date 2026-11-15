@@ -7,18 +7,31 @@ process, drives it over RPC the way a user would, and checks the results with
 assertions whose every failure prints a diff.
 
 ```lua
+-- spec/typing_spec.lua
 local Test = require 'test'
+local describe, it = Test.describe, Test.it
 local Nvim, assert = Test.Nvim, Test.assert
 
-local nv = Nvim.start { columns = 80, rows = 24 }
-nv:input 'ihello<Esc>'
-assert.deep_equal(nv:run(function() return vim.api.nvim_buf_get_lines(0, 0, -1, false) end), { 'hello' })
-nv:stop()
+describe('typing', function()
+  it('inserts text', function()
+    local nv = Nvim.start { columns = 80, rows = 24 }
+    nv:input 'ihello<Esc>'
+    assert.deep_equal(nv:run(function() return vim.api.nvim_buf_get_lines(0, 0, -1, false) end), { 'hello' })
+    nv:stop()
+  end)
+end)
 ```
 
-The library is one module, `require 'test'`, which exports `Nvim` (the child
-harness) and `assert` (the assertions). It is meant to be vendored as a single
-file with [nvim-bundle](https://github.com/jrop/nvim-bundle).
+```sh
+nvim --clean -l lua/test/init.lua   # or the vendored copy: lua/<plugin>/vendor/test.lua
+```
+
+The library is one file when vendored with
+[nvim-bundle](https://github.com/jrop/nvim-bundle). Required, it returns the
+child harness (`Nvim`), the assertions (`assert`), and the spec API
+(`describe`, `it`, `pending`, `before_all`, `after_all`, `before_each`,
+`after_each`). Run with `nvim -l`,
+it finds and runs your specs, so a plugin's tests need nothing but Neovim.
 
 ## Documentation
 
@@ -28,7 +41,7 @@ has one job:
 | Document | Read it when you want to |
 | --- | --- |
 | [Tutorial](docs/tutorial.md) | learn the library by writing your first spec, step by step |
-| [How-to guides](docs/how-to.md) | get a specific task done: vendor the library, run under busted, wait for a plugin, check an error |
+| [How-to guides](docs/how-to.md) | get a specific task done: vendor the library, run part of the suite, wait for a plugin, check an error |
 | [Reference](docs/reference.md) | look up exactly what a function takes, returns, and raises |
 | [Explanation](docs/explanation.md) | understand why the library is shaped the way it is |
 

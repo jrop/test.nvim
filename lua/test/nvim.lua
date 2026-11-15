@@ -1,11 +1,13 @@
 ---@diagnostic disable: global-in-non-module
 
+local coverage = require 'test.coverage'
+
 --- Nvim remote-control helper.
 --- Spawns a child `nvim --headless --embed` with RPC on stdio,
 --- drives it via msgpack-RPC, and snapshots the screen grid.
 ---
---- This child is headless but is NOT subject to the host (busted runner) nvim's
---- limitations: it has a real event loop driven by RPC, so `TextChanged`/
+--- This child is headless but is NOT subject to the limitations of the host
+--- process running the specs: it has a real event loop driven by RPC, so `TextChanged`/
 --- `TextChangedI` autocmds fire naturally from real input, and programmatic
 --- `:startinsert` genuinely enters insert mode. The mode change (and any
 --- scheduled work) is only observable across an RPC round-trip (a later `run`/
@@ -41,13 +43,10 @@ function Nvim.start(opts)
   if chan <= 0 then error('jobstart failed: ' .. chan, 2) end
   local self = setmetatable({ chan = chan }, Nvim)
 
-  -- Wait for readiness: retry nvim_get_api_info up to ~1s.
-  if
-    not vim.wait(1000, function() return pcall(vim.rpcrequest, chan, 'nvim_get_api_info') end, 10)
-  then
-    vim.fn.jobstop(chan)
-    error('child nvim never became ready', 2)
-  end
+  -- No readiness wait is needed: a request sent before the child is ready waits
+  -- in the pipe until the child reads it. 100 starts, each followed at once by
+  -- a request, all succeeded.
+  coverage.start_in(self)
 
   -- Add repo to child rtp.
   local rtp = opts.rtp or vim.fn.getcwd()
@@ -240,7 +239,11 @@ function Nvim:wait_until(pred, timeout_ms, msg)
   error(msg or ('wait_until: the predicate did not hold within %d ms'):format(timeout_ms), 2)
 end
 
---- Stop the child. Safe to call more than once.
-function Nvim:stop() vim.fn.jobstop(self.chan) end
+--- Stop the child. Safe to call more than once. During a coverage run, the
+--- child's recorded lines are read back first.
+function Nvim:stop()
+  coverage.collect(self)
+  vim.fn.jobstop(self.chan)
+end
 
 return Nvim

@@ -21,14 +21,6 @@ jobs:
     steps:
       - name: Check out
         uses: actions/checkout@v7
-        with:
-          # The type stubs for busted and luassert live in library/busted.
-          submodules: recursive
-
-      # mise builds Lua 5.1 from source, and its Linux build includes
-      # readline's headers, which the runner image does not ship.
-      - name: Install Lua build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libreadline-dev
 
       - name: Install tools
         uses: jdx/mise-action@v5

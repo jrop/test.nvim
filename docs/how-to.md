@@ -7,6 +7,9 @@ The examples use these names:
 
 ```lua
 local Test = require 'test'
+local describe, it, pending = Test.describe, Test.it, Test.pending
+local before_all, after_all = Test.before_all, Test.after_all
+local before_each, after_each = Test.before_each, Test.after_each
 local Nvim, assert = Test.Nvim, Test.assert
 ```
 
@@ -30,46 +33,117 @@ Without a ref, `install` uses the newest release tag; append `@<tag>` to the
 repository to pin one. Run `nvim-bundle install` with no arguments to rebuild
 the vendored file from `nvim-bundle.json`.
 
-## Run specs under busted
+Use nvim-bundle 0.4.1 or newer. Your specs require the same file that the
+command line is running, and only 0.4.1 and newer bundles share their modules
+between those two loads. A bundle built by an older version fails its first
+spec file with `loop or previous error loading module`.
 
-busted must run specs with Neovim's LuaJIT, because the specs call `vim.*`.
+## Run your specs
 
-1. Install busted for Lua 5.1 with luarocks.
-2. Point busted at Neovim in `.busted`, and put your sources on the path:
+Run the vendored file with `nvim -l` from your plugin's root:
 
-   ```lua
-   return {
-     _all = {
-       lpath = 'lua/?.lua;lua/?/init.lua',
-       lua = 'nvim -u NONE -i NONE -l',
-     },
-   }
-   ```
+```sh
+nvim --clean -l lua/<your-plugin>/vendor/test.lua
+```
 
-3. Export the luarocks paths, so Neovim's LuaJIT can find busted and luassert:
+With no arguments, it runs every `*_spec.lua` file under `spec/`. Your
+plugin's `lua/` directory is on `package.path`, so specs can `require` its
+modules. The command exits with status 1 when any case fails.
 
-   ```sh
-   eval "$(luarocks path)"
-   busted
-   ```
+## Run part of the suite
 
-Start a fresh child for each spec, and stop it even when the spec fails:
+Pass a directory, a file, or a glob, and narrow by case name with `--filter`:
+
+```sh
+nvim --clean -l lua/<your-plugin>/vendor/test.lua spec/ui
+nvim --clean -l lua/<your-plugin>/vendor/test.lua spec/ui/render_spec.lua
+nvim --clean -l lua/<your-plugin>/vendor/test.lua 'spec/**/*_spec.lua' --exclude 'spec/slow/**'
+nvim --clean -l lua/<your-plugin>/vendor/test.lua --filter 'renders a tag'
+```
+
+`--filter` keeps the cases whose full name, i.e., the `describe` names and the
+`it` name joined by spaces, contains the text. Quote globs, so the shell does
+not expand them first.
+
+## Share setup between cases
+
+Put the setup in `before_each` and the cleanup in `after_each`, inside the
+`describe` whose cases need them:
 
 ```lua
 describe('my plugin', function()
   local nv --- @type test.Nvim
 
   before_each(function() nv = Nvim.start { columns = 80, rows = 24 } end)
-
   after_each(function() nv:stop() end)
+
+  it('starts empty', function()
+    assert.deep_equal(nv:run(function() return vim.api.nvim_buf_get_lines(0, 0, -1, false) end), { '' })
+  end)
 end)
 ```
 
-To use the library's assertions everywhere in a file, shadow busted's `assert`
-with `local assert = Test.assert`. Calling the namespace, as in
-`assert(value, msg)`, still works. Keep busted's `assert` in files that need
-luassert's spies or mocks, and give the library's assertions another local
-name there.
+`after_each` runs even when the case fails, so the child is always stopped.
+
+## Share expensive setup across a scope
+
+Use `before_all` and `after_all` for setup that every case in a scope can
+share, such as a fixture directory:
+
+```lua
+describe('project files', function()
+  local dir
+
+  before_all(function()
+    dir = vim.fn.tempname()
+    vim.fn.mkdir(dir .. '/lua', 'p')
+  end)
+  after_all(function() vim.fn.delete(dir, 'rf') end)
+
+  it('finds the lua directory', function() assert.equal(vim.fn.isdirectory(dir .. '/lua'), 1) end)
+end)
+```
+
+Keep a child editor in `before_each`: a fresh child per case is what keeps one
+case's editor state out of the next.
+
+## Measure coverage
+
+Add `--coverage`:
+
+```sh
+nvim --clean -l lua/<your-plugin>/vendor/test.lua --coverage
+```
+
+After the summary, the report lists each file under `lua/` with its covered
+share of lines and the lines that never ran. Stop every child you start, with
+`nv:stop()` in an `after_each`, because a child's lines are read back when it
+stops.
+
+## Mark a case unfinished
+
+Declare it with `pending`, which reports it without running anything:
+
+```lua
+pending('renders nested tags')
+```
+
+## Run the specs in CI
+
+Install Neovim, check out your plugin, and run the same command:
+
+```yaml
+- uses: actions/checkout@v7
+- uses: rhysd/action-setup-vim@v1
+  with:
+    neovim: true
+    version: v0.12.5
+- run: nvim --clean -l lua/<your-plugin>/vendor/test.lua
+```
+
+No Lua, luarocks, or test runner needs installing. CI logs are not a
+terminal, so the output is plain; add `--color` if your CI renders ANSI
+colors.
 
 ## Load the plugin under test
 

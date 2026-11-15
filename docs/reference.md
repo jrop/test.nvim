@@ -2,15 +2,135 @@
 
 ## Module `test`
 
-`require 'test'` returns a table with two fields.
+`require 'test'` returns a table with these fields.
 
 | Field | Type | Description |
 | --- | --- | --- |
 | `Nvim` | `test.Nvim` | The child-Neovim harness class. |
 | `assert` | `test.assert` | The assertion namespace. |
+| `describe`, `it`, `pending`, `before_all`, `after_all`, `before_each`, `after_each` | functions | The spec API. |
 
 A bundle built with `nvim-bundle build test`, or vendored with
-`nvim-bundle install`, returns the same table.
+`nvim-bundle install`, returns the same table when required, and runs the
+command line when executed with `nvim -l`. A bundle that runs specs must be
+built by nvim-bundle 0.4.1 or newer.
+
+## Command line
+
+```text
+nvim -l <test.lua> [<path or glob>...] [--exclude <glob>]... [--filter <text>] [--coverage] [--color] [-h | --help]
+```
+
+`<test.lua>` is `lua/test/init.lua` in a checkout, or the vendored file.
+
+| Argument | Description |
+| --- | --- |
+| a directory | Includes every file under it whose name ends in `_spec.lua`. |
+| a file | Includes that file. |
+| anything else | A glob, matched with `vim.glob.to_lpeg` against paths relative to the current directory. |
+| no paths | The same as `spec`. |
+| `--exclude <glob>` | Skips the included paths that match. Repeatable. |
+| `--filter <text>` | Runs only the cases whose full name contains `<text>` as a plain substring. A full name is the enclosing `describe` names and the case's name, joined by spaces. |
+| `--coverage` | Reports line coverage after the run. See [Coverage](#coverage). |
+| `--color` | Colors the output even when stdout is not a terminal. |
+| `-h`, `--help` | Prints the usage and exits. |
+
+Before the run, `lua/?.lua` and `lua/?/init.lua` are prepended to
+`package.path`, relative to the current directory.
+
+Files run one at a time, in sorted order. After each file, the modules that the
+file loaded are removed from `package.loaded`.
+
+| Exit status | Meaning |
+| --- | --- |
+| 0 | Every case that ran passed. |
+| 1 | A case failed, a file failed to load or collect, or no files matched. |
+| 2 | An argument was invalid: an unknown option, or a glob that does not parse. |
+
+### Output
+
+For each file, the runner prints the file's path, then one line per case:
+`✓` for a pass, `✗` for a failure, and `-` with `(pending)` for a pending case.
+After all files, it prints each failure's full name and error, followed by the
+error's traceback frames that name the spec file. The last line is
+`<n> passed, <n> failed, <n> pending in <seconds>s`.
+
+The output is colored when stdout is a terminal, or when `--color` is given:
+
+| Text | Style |
+| --- | --- |
+| a file's path, and a failure's heading | bold; the heading also red |
+| `✓` | green |
+| `✗` | red |
+| a pending case | yellow |
+| a diff's `- ` and `+ ` lines | red and green |
+| a diff's `--- got` and `+++ want` headers | dim |
+| a non-zero count in the last line | green for passed, red for failed, yellow for pending |
+| a coverage share | green when every line ran, yellow otherwise |
+| a coverage row's missed lines | dim |
+
+### Coverage
+
+With `--coverage`, the run records every line that executes, in the host and in
+every child that `Nvim.start` starts, and prints a report after the summary:
+
+```text
+Coverage
+  lua/mod/init.lua   88.9%  8/9  missed: 4
+  total              88.9%  8/9
+```
+
+| Rule | Detail |
+| --- | --- |
+| Files reported | Every `lua/**/*.lua` file under the current directory, except paths containing `/vendor/`. A file that never loaded is reported with its lines missed. |
+| Lines counted | Every line that holds a bytecode instruction, in the main chunk and in every nested function. A function's closing `end` line is not counted when its only instruction is the implicit return. |
+| Child lines | `Nvim.start` installs the line hook in the child before it adds `opts.rtp`, so the hook is in place before any of the plugin's code can load. `Nvim:stop()` reads the child's lines back before stopping it, so a child that is never stopped, or that crashes, contributes nothing. |
+| Exit status | Unaffected; coverage does not fail a run. |
+
+Recording slows every line that runs, so a coverage run is slower than a plain
+one.
+
+## Spec API
+
+A spec file declares its cases when it loads. Each function below raises
+`<name>: no spec run is active` when it is called outside a run.
+
+### `describe(name, fn)`
+
+Opens a scope named `name` and calls `fn` immediately, collecting the cases and
+hooks it declares. Scopes nest. An error raised by `fn` fails the whole file,
+and none of the file's cases run.
+
+### `it(name, fn)`
+
+Declares a case. `fn` runs after the whole file has been collected. Raises when
+`fn` is not a function.
+
+### `pending(name)`
+
+Declares a case that is reported as pending and not run.
+
+### `before_all(fn)` and `after_all(fn)`
+
+Register a hook that runs once per scope: `before_all` before the first
+selected case in the scope, nested scopes included, and `after_all` after the
+last one. Called outside any `describe`, they apply to the whole file. A scope
+in which `--filter` selects no case runs neither hook.
+
+When a `before_all` raises, the scope's remaining `before_all` hooks and all
+of its cases are skipped, and each selected case is reported as failed with
+`before_all in <scope> failed:` and the error. The scope's `after_all` hooks
+still run. An `after_all` that raises is reported as a failure named
+`<scope> (after_all)`.
+
+### `before_each(fn)` and `after_each(fn)`
+
+Register a hook on the current scope, which is the file itself when called
+outside any `describe`. For each case, the `before_each` hooks of its enclosing
+scopes run from the outermost scope inward, in the order they were declared.
+If one raises, the rest and the case itself are skipped. The `after_each`
+hooks then run from the innermost scope outward, always. Every error that a
+case or its hooks raise is reported with the case.
 
 ## Class `test.Nvim`
 
@@ -19,10 +139,10 @@ A bundle built with `nvim-bundle build test`, or vendored with
 Starts a child Neovim and returns its handle, a `test.Nvim`.
 
 The child runs `nvim --headless --embed -n -u NORC` with RPC over stdio, using
-the same `nvim` binary as the host. After the child answers
-`nvim_get_api_info`, `start` appends `opts.rtp` to the child's runtimepath with
-`set rtp+=`. Startup has already finished at that point, so the appended
-directory's `plugin/` files are not sourced.
+the same `nvim` binary as the host. `start` then appends `opts.rtp` to the
+child's runtimepath with `set rtp+=`, and returns once the child has answered.
+Startup has already finished at that point, so the appended directory's
+`plugin/` files are not sourced.
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -31,9 +151,8 @@ directory's `plugin/` files are not sourced.
 | `rtp` | `string?` | `vim.fn.getcwd()` | The directory appended to the child's runtimepath. |
 | `env` | `table<string, string>?` | none | Variables added to the environment the child inherits. |
 
-Raises `jobstart failed: <code>` when the process cannot start, and
-`child nvim never became ready` when the child does not answer within one
-second.
+Raises `jobstart failed: <code>` when the process cannot start, and a channel
+error when the child exits before it answers.
 
 ### `nv:stop()`
 

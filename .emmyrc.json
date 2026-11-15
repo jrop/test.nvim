@@ -8,6 +8,6 @@
   },
   "workspace": {
     "ignoreDir": ["dist"],
-    "library": ["$VIMRUNTIME", "library/busted"]
+    "library": ["$VIMRUNTIME"]
   }
 }

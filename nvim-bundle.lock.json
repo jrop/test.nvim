@@ -1,0 +1,14 @@
+{
+  "dependencies": {
+    "args": {
+      "built_with": "0.4.0",
+      "commit": "d3f79feff8cd7c1934c1bd9307fd0832e4d7ae21",
+      "entry": "args",
+      "kind": "tag",
+      "ref": "v0.1.0",
+      "sha256": "b661c9d202d94c5ac8a284ead7323c8c52fe41aa090f7fba32b0450e7cc7e4a2",
+      "source": "https://github.com/jrop/args.nvim"
+    }
+  },
+  "lock_version": 1
+}

@@ -1,22 +1,29 @@
---- @diagnostic disable: undefined-field
+-- These specs check `test.assert` with Lua's built-in `assert` and the helpers
+-- below, not with `test.assert` itself, so a bug in the library cannot hide
+-- itself.
+local Test = require 'test'
+local describe, it = Test.describe, Test.it
+local T = Test.assert
 
--- These specs check `test.assert` with busted's own `assert`, so a bug in the
--- library cannot hide itself.
-local T = require('test').assert
+--- @param want any
+--- @param got any
+local function same(want, got)
+  assert(vim.deep_equal(want, got), ('want %s, got %s'):format(vim.inspect(want), vim.inspect(got)))
+end
 
 --- Run `f`, require it to raise, and return the error text.
 --- @param f fun()
 --- @return string
 local function failure(f)
   local ok, err = pcall(f)
-  assert.is_false(ok, 'expected the assertion to fail')
+  assert(not ok, 'expected the assertion to fail')
   return tostring(err)
 end
 
 --- @param haystack string
 --- @param needle string
 local function has(haystack, needle)
-  assert.is_truthy(haystack:find(needle, 1, true), ('missing %q in:\n%s'):format(needle, haystack))
+  assert(haystack:find(needle, 1, true), ('missing %q in:\n%s'):format(needle, haystack))
 end
 
 describe('test.assert', function()
@@ -51,14 +58,14 @@ describe('test.assert', function()
     }
     for name, f in pairs(failures) do
       local err = failure(f)
-      assert.is_truthy(err:find('\n--- got\n+++ want\n', 1, true), name .. ':\n' .. err)
+      assert(err:find('\n--- got\n+++ want\n', 1, true), name .. ':\n' .. err)
     end
   end)
 
   describe('ok and the namespace call', function()
     it('return the value when it is truthy', function()
-      assert.are.same(3, T.ok(3))
-      assert.are.same('x', T 'x')
+      same(3, T.ok(3))
+      same('x', T 'x')
     end)
 
     it('fail on false and nil', function()
@@ -190,7 +197,7 @@ describe('test.assert', function()
   describe('raises', function()
     it('returns the error', function()
       local err = T.raises(function() error { code = 7 } end)
-      assert.are.same({ code = 7 }, err)
+      same({ code = 7 }, err)
     end)
 
     it('checks the error for a plain substring', function()

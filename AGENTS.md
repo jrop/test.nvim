@@ -12,8 +12,21 @@ Shared test helpers for Neovim plugin specs:
   `ok`, `is_nil`, `equal`, `not_equal`, `deep_equal`, `not_deep_equal`,
   `contains`, `matches`, and `raises`. Every failure prints the shortest line
   diff of two values, built from a Levenshtein table without replacement.
+- **`lua/test/runner.lua`** — the spec API (`describe`, `it`, `pending`,
+  `before_all`, `after_all`, `before_each`, `after_each`) and the runner that
+  collects and runs it.
+- **`lua/test/coverage.lua`** — `--coverage`: line hooks in the host and every
+  child, and the per-file report.
+- **`lua/test/color.lua`** — ANSI styling, on for a terminal or with `--color`.
+- **`lua/test/cli.lua`** — the `nvim -l` command line: argument parsing,
+  spec discovery with `vim.glob`, and the exit status.
+- **`lua/test/vendor/args.lua`** — argument parser vendored by
+  `nvim-bundle install jrop/args.nvim args` and recorded in
+  `nvim-bundle.json`. Do not edit it; rerun `nvim-bundle install` instead.
 - **`lua/test/init.lua`** — the library's one public surface,
-  `{ Nvim, assert }`.
+  `{ Nvim, assert, describe, it, pending, before_all, after_all, before_each,
+  after_each }`. Executed
+  as `nvim -l lua/test/init.lua`, it runs the command line instead.
 - **`docs/`** — user documentation in the four Diátaxis forms: `tutorial.md`,
   `how-to.md`, `reference.md`, and `explanation.md`. `README.md` is a landing
   page that links to them. Keep each document to its one job: steps a learner
@@ -45,20 +58,18 @@ All tasks use `mise`:
 - `mise run fmt` — format with stylua
 - `mise run fmt:check` — check formatting
 - `mise run lint` — type-check with `emmylua_check` (warnings are errors)
-- `mise run test` — run busted on Neovim 0.12.5's LuaJIT
-- `mise run test:coverage` — test with luacov
+- `mise run test` — run the specs with the library's own runner
+- `mise run test:coverage` — the same, with a line-coverage report
 - `mise run ci` — `fmt:check` → `lint` → `test`
 
-`mise.toml`'s `[env]` sets the environment these tasks need: `LUA_PATH` and
-`LUA_CPATH` from `luarocks path`, so busted's `nvim -l` runner finds busted and
-luassert, and `VIMRUNTIME`, which `.emmyrc.json` loads as a type library.
-`mise exec` sets the same variables.
+`mise.toml`'s `[env]` sets `VIMRUNTIME`, which `.emmyrc.json` loads as a type
+library; an editor sets it for its language server, but a shell does not.
 
-Run one spec directly after preparing the test dependencies:
+Run one spec file, or part of one, directly:
 
 ```sh
-mise run test:prepare
-mise exec -- busted spec/nvim_spec.lua
+nvim -u NONE -i NONE -l lua/test/init.lua spec/nvim_spec.lua
+nvim -u NONE -i NONE -l lua/test/init.lua --filter 'run_async'
 ```
 
 ## Architecture
@@ -73,26 +84,51 @@ mise exec -- busted spec/nvim_spec.lua
   table without replacement, over suffixes, and walks it forward. Strings and
   lists of strings print one quoted entry per line, because `vim.inspect`
   prints a list on one line.
-- **`lua/test/init.lua`** — the public surface.
-- **`spec/helper.lua`** — busted helper that saves luacov stats at exit.
+- **`lua/test/runner.lua`** — the tree of scopes and cases, built while a spec
+  file loads, and the run: hooks outer to inner before a case and inner to
+  outer after it, the module reset after each file, and the `Report` that
+  counts each outcome and prints it in the same step. The collecting scope is
+  a module local.
+- **`lua/test/coverage.lua`** — hits recorded by one line-hook function,
+  `record_lines`, which runs in the host and, through `Nvim:run` at start, in
+  every child; `Nvim:stop()` reads a child's hits back. Executable lines come
+  from `jit.util` bytecode walks, without a function's implicit closing `RET0`.
+  The recording flag is a module local; the hits live in the global
+  `__test_coverage_hits` in each process, because `record_lines` also runs in
+  children, which do not load the library.
+- **`lua/test/cli.lua`** — argument parsing, spec discovery, the color
+  decision (`vim.uv.guess_handle(1) == 'tty'`, or `--color`), exit status, and
+  `running()`, which is true while `main` runs.
+- **`lua/test/init.lua`** — the public surface, and the script entry. Run as
+  the script, it hands off to `test.cli` before loading the other modules; the
+  CLI starts coverage and then requires the runner, so the library's own
+  modules are recorded from their first line. A spec that requires the
+  running file executes this entry again. Every other module is shared between
+  the two executions: a checkout's requires hit `package.loaded`, and a bundle
+  built by nvim-bundle 0.4.1 or newer keeps one module cache per file. So
+  module state lives in plain locals, and the entry alone must tell the two
+  executions apart: it reads the plain `arg`, which a bundle empties on the
+  second execution, and asks `cli.running()`, which covers a checkout.
 - **`spec/api_spec.lua`** — the exported names of `test`, `test.assert`, and
   `test.Nvim`.
+- **`spec/runner_spec.lua`** — the runner and command line, checked from
+  outside: each case writes a spec project to a temporary directory and runs
+  the CLI on it in a separate `nvim -l`. Those runs write to a pipe, so their
+  output is plain unless the case passes `--color`.
 - **`spec/assert_spec.lua`** — each assertion's pass and fail cases, failure
   output (including the diff's insertion, deletion, replacement, and
   shortest-diff choice), and the error level that names the spec's line.
 - **`spec/nvim_spec.lua`** — child start/stop and `env`, sync runs, async jobs
   (`wait`, concurrency, errors, timeout, `on_settled`), input, screen, drain,
   and `wait_until` success and timeout.
-- **`library/busted`** — a git submodule of LuaCATS/busted, providing busted type
-  stubs for the Lua language server (stylua-ignored). Initialize it after cloning
-  with `git submodule update --init --recursive`.
 
 ## Test environment
 
-The outer suite runs host-side under busted on Neovim's LuaJIT. The `nvim` spec
-then starts its own child `nvim --headless --embed` and drives it over RPC. That
-child has a real event loop: input, autocmds, and scheduled callbacks behave as
-they do interactively, unlike the host busted runner.
+The outer suite runs host-side under the library's own runner, on Neovim's
+LuaJIT. The `nvim` spec then starts its own child `nvim --headless --embed` and
+drives it over RPC. That child has a real event loop: input, autocmds, and
+scheduled callbacks behave as they do interactively, unlike the host process
+running the specs.
 
 Two rules follow from the RPC boundary:
 
@@ -111,8 +147,11 @@ Two rules follow from the RPC boundary:
   function a `done` callback and returns a `test.Pending`; `wait` blocks for the
   value, and `on_settled` calls back without blocking. The child reports with
   `vim.rpcnotify`, and an error raised before `done` settles the job.
-- The library's own specs check it with busted's `assert`, not `test.assert`, so
-  a bug in the assertions cannot hide itself.
+- Specs use explicit locals (`local describe, it = Test.describe, Test.it`),
+  never injected globals.
+- `spec/assert_spec.lua` checks `test.assert` with Lua's built-in `assert` and
+  local helpers, not with `test.assert`, so a bug in the assertions cannot hide
+  itself.
 - `wait_until` polls a child-side predicate and issues one RPC round trip per
   attempt, because the round trip — not an in-child wait — is the child's
   event-loop flush point. The predicate belongs to the caller, so plugin

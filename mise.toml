@@ -9,10 +9,9 @@ emmylua_check = "github:EmmyLuaLs/emmylua-analyzer-rust"
 emmylua_ls = "github:EmmyLuaLs/emmylua-analyzer-rust"
 
 [tools]
-"asdf:mise-plugins/mise-lua" = { version = "5.1.5", install_env = { ASDF_LUA_LUAROCKS_VERSION = "3.12.2" } }
 neovim = "0.12.5"
 stylua = "2.5.2"
-"github:jrop/nvim-bundle" = "0.4.0"
+"github:jrop/nvim-bundle" = "0.4.1"
 
 [tools.emmylua_check]
 version = "0.25.1"
@@ -33,11 +32,6 @@ platforms.macos-x64 = { asset_pattern = "emmylua_ls-darwin-x64.tar.gz" }
 ################################################################################
 
 [env]
-# busted runs its specs under `nvim -l` (see .busted), so Neovim's LuaJIT finds
-# busted and luassert only through LUA_PATH and LUA_CPATH. The trailing `;;`
-# keeps Lua's default search paths after the luarocks trees.
-LUA_PATH = { value = "{{ exec(command='luarocks path --lr-path') }};;", tools = true }
-LUA_CPATH = { value = "{{ exec(command='luarocks path --lr-cpath') }};;", tools = true }
 # .emmyrc.json loads Neovim's runtime as a type library through $VIMRUNTIME. An
 # editor sets it for its language server, but a shell running `emmylua_check`
 # does not.
@@ -52,21 +46,13 @@ lint = "emmylua_check --warnings-as-errors ."
 fmt = "stylua ."
 "fmt:check" = "stylua --check ."
 
-[tasks."test:prepare"]
-run = "luarocks test --prepare"
-
+# The library runs its own specs: `nvim -l lua/test/init.lua` is the same
+# command line a vendored copy offers its consumers.
 [tasks.test]
-depends = ["test:prepare"]
-run = "busted --verbose"
+run = "nvim -u NONE -i NONE -l lua/test/init.lua"
 
 [tasks."test:coverage"]
-depends = ["test:prepare"]
-run = '''
-rm -f ./luacov.*.*
-busted --coverage --verbose
-luacov
-awk '/^Summary$/{flag=1;next} flag{print}' luacov.report.out
-'''
+run = "nvim -u NONE -i NONE -l lua/test/init.lua --coverage"
 
 [tasks.ci]
 run = '''

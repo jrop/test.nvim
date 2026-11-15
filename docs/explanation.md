@@ -86,11 +86,11 @@ keyword.
 
 The assertions live in a namespace, `assert.*`, rather than under a prefix such
 as `assert_*`, because a namespace is how Node signals that a call is an
-assertion. A spec can then shadow busted's global with
+assertion. A spec can then shadow Lua's built-in with
 `local assert = Test.assert`, and the namespace is callable so that
 `assert(value, msg)` keeps working after the shadowing. Most names keep
-busted's meaning; for example, `equal` checks identity and `matches` takes a
-Lua pattern.
+luassert's meaning, which eases a move from busted; for example, `equal`
+checks identity and `matches` takes a Lua pattern.
 
 ## Why every failure prints a diff
 
@@ -118,12 +118,58 @@ value. A Lua table cannot hold `nil`, so Neovim represents that value as
 `vim.NIL` in the host. The two mean the same thing to a spec, so `is_nil`
 accepts both, while `equal` and `deep_equal` keep them distinct.
 
+## Why the library runs its own specs
+
+A plugin's specs need Neovim to run, and the library already starts Neovim.
+busted, by contrast, needs a whole toolchain beside it: a standalone Lua 5.1
+for luarocks, luarocks itself, busted and luassert, and search paths that let
+Neovim's LuaJIT find them. An example of that toolchain's cost is CI: building
+Lua 5.1 from source needs system headers that a stock runner lacks. A runner
+inside the library replaces all of it with `nvim -l`.
+
+The runner can stay small because the rest of the library already does the
+hard parts. Assertions report a failure by raising an error that already holds
+a diff, so the runner only catches errors and prints them. Each case starts
+its own child editor, so child-side state cannot leak between cases; the
+runner only resets the host side, by dropping the modules each file loaded.
+And waits block on `vim.wait`, which keeps the host's event loop running, so
+async work needs nothing from the runner.
+
+The spec API is explicit locals, `local describe, it = Test.describe, Test.it`,
+rather than injected globals. A reader can then see where every name in a spec
+comes from, and the type checker knows each name's signature without a stub
+library.
+
+## How coverage works without luacov
+
+Coverage needs two numbers per file: the lines that ran, and the lines that
+could have. Both are available inside Neovim's LuaJIT. A line hook,
+`debug.sethook(fn, 'l')`, sees every line that runs, even in JIT-compiled
+code. `jit.util` exposes each function's bytecode with its line numbers, so
+the lines that hold code are the lines some instruction belongs to.
+
+LuaJIT's built-in profiler, `jit.profile`, cannot do this job: it samples,
+so a function that runs once, but briefly, never appears.
+
+The part that shapes the design is where the code runs. A plugin's code mostly
+runs in the child editors, not in the process running the specs, so a hook in
+the host alone would report it as never run. Each child therefore installs the
+same hook as it starts, and `Nvim:stop()` reads the child's lines back before
+stopping it. The report merges the host's lines with every child's.
+
+One rule keeps the numbers honest. A function that ends in `error(...)` still
+gets an implicit return instruction on its closing `end`, and that instruction
+can never run, so the line would always show as missed. The report leaves out
+a closing `end` whose only instruction is that implicit return; the line
+before it already shows whether the function got that far.
+
 ## Why the library is one module
 
 A consumer reaches every helper through `require 'test'`. The reason is
 vendoring: `nvim-bundle build test` produces one file that returns only the
 `test` module, so a path such as `require 'test.nvim'` would not exist in a
-vendored copy. The files under `lua/test/` are the implementation, and
+vendored copy. The same file is also the command line, because the one thing a
+consumer vendors should be everything a consumer needs. The files under `lua/test/` are the implementation, and
 `init.lua` is the whole public surface.
 
 ## What belongs in the library
