@@ -26,8 +26,21 @@ end)
 nvim --clean -l lua/test/init.lua   # or the vendored copy: lua/<plugin>/vendor/test.lua
 ```
 
-The library is one file when vendored with
-[nvim-bundle](https://github.com/jrop/nvim-bundle). Required, it returns the
+## Install
+
+Vendor test.nvim into your plugin with
+[nvim-bundle](https://github.com/jrop/nvim-bundle#install), as a dev dependency
+so that nothing built from your plugin ships it:
+
+```sh
+nvim-bundle install --dev jrop/test.nvim test
+```
+
+This writes `lua/<your-plugin>/vendor/test.lua` and records the release it used
+in `nvim-bundle.json`. See [Vendor the library](docs/how-to.md#vendor-the-library)
+for pinning a release and the nvim-bundle version it needs.
+
+The vendored library is one file. Required, it returns the
 child harness (`Nvim`), the assertions (`assert`), and the spec API
 (`describe`, `it`, `pending`, `before_all`, `after_all`, `before_each`,
 `after_each`). Run with `nvim -l`,

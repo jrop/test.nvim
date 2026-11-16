@@ -4,18 +4,22 @@ In this tutorial, you will write a tiny plugin and a spec that drives it in a
 real Neovim. By the end, the spec will start an editor, type into it, wait for
 the plugin to react, and check what the screen shows.
 
-You need Neovim 0.12 or newer and `git`. Nothing else: test.nvim runs the specs
-itself, under `nvim -l`.
+You need Neovim 0.12 or newer and
+[nvim-bundle](https://github.com/jrop/nvim-bundle#install). Nothing else:
+test.nvim runs the specs itself, under `nvim -l`.
 
 ## 1. Create the project
 
-Make a directory for the plugin, and clone test.nvim into it:
+Make a directory for the plugin, and vendor test.nvim into it:
 
 ```sh
 mkdir -p greet.nvim/lua/greet greet.nvim/spec
 cd greet.nvim
-git clone https://github.com/jrop/test.nvim deps/test.nvim
+nvim-bundle install --dev jrop/test.nvim test
 ```
+
+nvim-bundle writes the whole library as one file,
+`lua/greet/vendor/test.lua`, so your specs load it as `greet.vendor.test`.
 
 Every command from here on runs inside `greet.nvim`.
 
@@ -46,7 +50,7 @@ After `setup()`, the command `:Greet Ada` replaces the buffer with
 Create `spec/greet_spec.lua`:
 
 ```lua
-local Test = require 'test'
+local Test = require 'greet.vendor.test'
 local describe, it, before_each, after_each = Test.describe, Test.it, Test.before_each, Test.after_each
 local Nvim, assert = Test.Nvim, Test.assert
 
@@ -65,7 +69,7 @@ end)
 Run it:
 
 ```sh
-nvim --clean -l deps/test.nvim/lua/test/init.lua
+nvim --clean -l lua/greet/vendor/test.lua
 ```
 
 You should see:
@@ -157,7 +161,7 @@ Your spec now starts a fresh editor for each case, types into it, loads your
 plugin, waits for the plugin to react, and checks both the buffer and the
 screen. From here:
 
-- [Vendor the library](how-to.md#vendor-the-library) instead of cloning it.
+- [Pin or update the vendored library](how-to.md#vendor-the-library).
 - [Run part of the suite](how-to.md#run-part-of-the-suite) while you work.
 - Read [why the library works this way](explanation.md), including why the
   function passed to `run` cannot see your spec's local variables.

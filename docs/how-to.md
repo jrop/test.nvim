@@ -19,11 +19,12 @@ Vendor test.nvim into your plugin as one file with
 [nvim-bundle](https://github.com/jrop/nvim-bundle):
 
 ```sh
-nvim-bundle install jrop/test.nvim test
+nvim-bundle install --dev jrop/test.nvim test
 ```
 
-This writes `lua/<your-plugin>/vendor/test.lua` and records the dependency in
-`nvim-bundle.json`. Require it by that path:
+This writes `lua/<your-plugin>/vendor/test.lua` and records the dependency
+under `dev_dependencies` in `nvim-bundle.json`, so a bundle built from your
+plugin leaves the runner out. Require it by that path:
 
 ```lua
 local Test = require '<your-plugin>.vendor.test'
