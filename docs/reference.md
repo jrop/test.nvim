@@ -51,6 +51,8 @@ file loaded are removed from `package.loaded`.
 
 For each file, the runner prints the file's path, then one line per case:
 `✓` for a pass, `✗` for a failure, and `-` with `(pending)` for a pending case.
+A case that took longer than 75 ms, counting its `before_each` and `after_each`
+hooks, has its time after its name, such as `✓ loads the index (120ms)`.
 After all files, it prints each failure's full name and error, followed by the
 error's traceback frames that name the spec file. The last line is
 `<n> passed, <n> failed, <n> pending in <seconds>s`.
@@ -63,6 +65,7 @@ The output is colored when stdout is a terminal, or when `--color` is given:
 | `✓` | green |
 | `✗` | red |
 | a pending case | yellow |
+| a slow case's time | dim |
 | a diff's `- ` and `+ ` lines | red and green |
 | a diff's `--- got` and `+++ want` headers | dim |
 | a non-zero count in the last line | green for passed, red for failed, yellow for pending |
@@ -71,8 +74,9 @@ The output is colored when stdout is a terminal, or when `--color` is given:
 
 ### Coverage
 
-With `--coverage`, the run records every line that executes, in the host and in
-every child that `Nvim.start` starts, and prints a report after the summary:
+With `--coverage`, the run records every line that executes, in the host, in
+every child that `Nvim.start` starts, and in every script that `Nvim.script`
+runs, and prints a report after the summary:
 
 ```text
 Coverage
@@ -83,8 +87,9 @@ Coverage
 | Rule | Detail |
 | --- | --- |
 | Files reported | Every `lua/**/*.lua` file under the current directory, except paths containing `/vendor/`. A file that never loaded is reported with its lines missed. |
-| Lines counted | Every line that holds a bytecode instruction, in the main chunk and in every nested function. A function's closing `end` line is not counted when its only instruction is the implicit return. |
-| Child lines | `Nvim.start` installs the line hook in the child before it adds `opts.rtp`, so the hook is in place before any of the plugin's code can load. `Nvim:stop()` reads the child's lines back before stopping it, so a child that is never stopped, or that crashes, contributes nothing. |
+| Lines counted | Every line that holds a bytecode instruction, in the main chunk and in every nested function. A function's closing `end` line holds the instruction that creates the function, so it counts as run whenever the definition runs. |
+| Child and script lines | `Nvim.start` and `Nvim.script` install the line hook with `--cmd`, so the hook is in place before any of the plugin's code, or a script's first line, can run. The process writes its lines to a file in a temporary directory when it exits, whether it is stopped, returns, or calls `os.exit`, and the report reads them when the run ends. A process that crashes, is killed, or is still running when the run ends contributes nothing. |
+| Disabled lines | Lines after a `-- luacov: disable` line are not counted, until a `-- luacov: enable` line or the end of the file. A marker must be the whole line, apart from indentation. The scan reads lines, not Lua, so a line inside a multi-line string that is exactly a marker also counts as one. |
 | Exit status | Unaffected; coverage does not fail a run. |
 
 Recording slows every line that runs, so a coverage run is slower than a plain
@@ -139,7 +144,7 @@ case or its hooks raise is reported with the case.
 Starts a child Neovim and returns its handle, a `test.Nvim`.
 
 The child runs `nvim --headless --embed -n -u NORC` with RPC over stdio, using
-the same `nvim` binary as the host. `start` then appends `opts.rtp` to the
+the same `nvim` binary as the host (`vim.v.progpath`). `start` then appends `opts.rtp` to the
 child's runtimepath with `set rtp+=`, and returns once the child has answered.
 Startup has already finished at that point, so the appended directory's
 `plugin/` files are not sourced.
@@ -154,9 +159,28 @@ Startup has already finished at that point, so the appended directory's
 Raises `jobstart failed: <code>` when the process cannot start, and a channel
 error when the child exits before it answers.
 
+### `Nvim.script(path, args?, opts?)`
+
+Runs `nvim -l <path> <args...>` as a plain process, waits for it to exit, and
+returns its `vim.SystemCompleted`. Use it for a script that writes to stdout or
+sets its exit status, which an `Nvim.start` child cannot do because its stdio
+carries RPC.
+
+The process uses the same `nvim` binary as the host (`vim.v.progpath`). `-l`
+already skips the user's config, plugins, and shada, so no other flags are
+added.
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `path` | `string` | required | The script, relative to `opts.cwd` or to the host's current directory. |
+| `args` | `string[]?` | none | The script's `arg[1]`, `arg[2]`, and so on. |
+| `opts` | `vim.SystemOpts?` | `{ text = true }` | Passed to `vim.system`; `text` is true unless `opts` sets it. |
+
 ### `nv:stop()`
 
-Stops the child. Calling it more than once is safe.
+Closes the child's channel, and waits for the child to exit. A child that has
+not exited after 2000 ms, such as one stuck in a busy loop, is killed. Calling
+it more than once is safe.
 
 ### `nv:request(method, ...)`
 

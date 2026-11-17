@@ -38,9 +38,9 @@ end
 --- @param argv? string[]
 --- @return integer code, string output  stdout followed by stderr
 local function cli(dir, argv)
-  local cmd = { vim.v.progpath, '-u', 'NONE', '-i', 'NONE', '-l', INIT }
-  vim.list_extend(cmd, argv or {})
-  local result = vim.system(cmd, { cwd = dir, text = true }):wait()
+  -- `Nvim.script`, rather than `vim.system`, lets a coverage run of this
+  -- repository count the lines the CLI runs in that process.
+  local result = Test.Nvim.script(INIT, argv, { cwd = dir })
   return result.code, (result.stdout or '') .. (result.stderr or '')
 end
 
@@ -69,6 +69,31 @@ end)
     assert.contains(out, '  - math later (pending)\n')
     assert.contains(out, '- "a"\n+ "b"')
     assert.contains(out, '1 passed, 1 failed, 1 pending')
+  end)
+
+  it('prints the time of a case slower than 75 ms beside its name', function()
+    local dir = project {
+      ['spec/time_spec.lua'] = HEADER .. [[
+it('fast', function() end)
+it('slow', function() vim.uv.sleep(100) end)
+it('slow and failing', function()
+  vim.uv.sleep(100)
+  error 'late'
+end)
+]],
+    }
+    local _, out = cli(dir)
+    assert.contains(out, '  ✓ fast\n')
+    assert.matches(out, '  ✓ slow %(%d+ms%)\n')
+    assert.matches(out, '  ✗ slow and failing %(%d+ms%)\n')
+  end)
+
+  it("paints a slow case's time dim", function()
+    local dir = project {
+      ['spec/time_spec.lua'] = HEADER .. "it('slow', function() vim.uv.sleep(100) end)\n",
+    }
+    local _, out = cli(dir, { '--color' })
+    assert.matches(out, ' slow \27%[2m%(%d+ms%)\27%[0m\n')
   end)
 
   it('exits 0 when every case passes', function()
@@ -165,6 +190,7 @@ describe('db', function()
   after_all(function() table.insert(_G.log, 'after_all') end)
   it('reads', function() table.insert(_G.log, 'reads') end)
   it('writes', function() table.insert(_G.log, 'writes') end)
+  pending('migrates')
 end)
 it('checks the log', function() assert.deep_equal(_G.log, { 'after_all' }) end)
 ]],
@@ -172,6 +198,8 @@ it('checks the log', function() assert.deep_equal(_G.log, { 'after_all' }) end)
     local code, out = cli(dir)
     assert.equal(code, 1)
     assert.contains(out, '  ✗ db reads\n  ✗ db writes\n')
+    -- A pending case never runs, so the failed setup does not fail it.
+    assert.contains(out, '  - db migrates (pending)\n')
     assert.contains(out, 'before_all in db failed:')
     assert.contains(out, 'no connection')
     assert.contains(out, '  ✓ checks the log\n')
@@ -260,13 +288,10 @@ end)
     local dir = project {
       ['spec/alone_spec.lua'] = HEADER .. "describe('alone', function() end)\n",
     }
-    local result = vim
-      .system({ vim.v.progpath, '-u', 'NONE', '-i', 'NONE', '-l', 'spec/alone_spec.lua' }, {
-        cwd = dir,
-        text = true,
-        env = { LUA_PATH = ('%s/?.lua;%s/?/init.lua;;'):format(LUA_DIR, LUA_DIR) },
-      })
-      :wait()
+    local result = Test.Nvim.script('spec/alone_spec.lua', {}, {
+      cwd = dir,
+      env = { LUA_PATH = ('%s/?.lua;%s/?/init.lua;;'):format(LUA_DIR, LUA_DIR) },
+    })
     assert.not_equal(result.code, 0)
     assert.contains(result.stderr or '', 'no spec run is active')
   end)
@@ -315,6 +340,12 @@ describe('the command line', function()
     assert.contains(out, 'no spec files matched')
   end)
 
+  it('exits 2 on a glob that does not compile', function()
+    local code, out = cli(two_files(), { 'spec/[' })
+    assert.equal(code, 2)
+    assert.contains(out, 'test: invalid glob "spec/["')
+  end)
+
   it('exits 2 on an unknown option', function()
     local code, out = cli(two_files(), { '--bogus' })
     assert.equal(code, 2)
@@ -354,6 +385,96 @@ end)
     assert.contains(out, '\nCoverage\n')
     assert.contains(out, 'lua/mod/init.lua   88.9%  8/9  missed: 4\n')
     assert.equal(out:find('vendor', 1, true), nil, out)
+  end)
+
+  it('counts lines a script run by Nvim.script reaches, even through os.exit', function()
+    local dir = project {
+      ['lua/tool.lua'] = [[
+local function unused()
+  return 1
+end
+if arg[1] == 'fail' then
+  io.stderr:write 'failing\n'
+  os.exit(1)
+end
+io.stdout:write 'ok\n'
+]],
+      ['spec/tool_spec.lua'] = HEADER .. [[
+it('runs the script to completion and to a failure', function()
+  assert.equal(Test.Nvim.script('lua/tool.lua').code, 0)
+  assert.equal(Test.Nvim.script('lua/tool.lua', { 'fail' }).code, 1)
+end)
+]],
+    }
+    local code, out = cli(dir, { '--coverage' })
+    assert.equal(code, 0, out)
+    -- Line 8 runs only on the normal exit, and line 6 only on the os.exit path.
+    assert.contains(out, 'lua/tool.lua   83.3%  5/6  missed: 2\n')
+  end)
+
+  it('joins consecutive missed lines into one range', function()
+    local dir = project {
+      ['lua/unused.lua'] = [[
+local M = {}
+function M.unused(t)
+  t.a = 1
+  t.b = 2
+  t.c = 3
+end
+return M
+]],
+      ['spec/unused_spec.lua'] = HEADER .. "it('loads it', function() require 'unused' end)\n",
+    }
+    local code, out = cli(dir, { '--coverage' })
+    assert.equal(code, 0, out)
+    assert.contains(out, 'missed: 3-5\n')
+  end)
+
+  it('leaves out the lines that luacov markers disable', function()
+    local dir = project {
+      ['lua/marked.lua'] = [[
+-- Prose that mentions -- luacov: disable is not a marker.
+local M = {}
+-- luacov: disable
+function M.disabled()
+  return 1
+end
+-- luacov: enable
+function M.counted()
+  return 2
+end
+-- luacov: disable
+function M.disabled_to_the_end()
+  return 3
+end
+return M
+]],
+      ['spec/marked_spec.lua'] = HEADER .. "it('loads it', function() require 'marked' end)\n",
+    }
+    local code, out = cli(dir, { '--coverage' })
+    assert.equal(code, 0, out)
+    -- Lines 2 and 8-10 are counted; line 9 is the only one that never ran.
+    assert.contains(out, 'lua/marked.lua   75.0%  3/4  missed: 9\n')
+  end)
+
+  it('never leaves the closing end of a function that ends in error() missed', function()
+    local dir = project {
+      ['lua/fail.lua'] = [[
+local M = {}
+function M.fail()
+  error 'always'
+end
+return M
+]],
+      ['spec/fail_spec.lua'] = HEADER .. [[
+it('calls it', function() assert.ok(not pcall(require('fail').fail)) end)
+]],
+    }
+    local code, out = cli(dir, { '--coverage' })
+    assert.equal(code, 0, out)
+    -- The `end` never runs its return, but it also holds the instruction that
+    -- creates the function, so the line runs when the definition does.
+    assert.contains(out, 'lua/fail.lua  100.0%  5/5\n')
   end)
 
   it('reports a source file that does not load instead of skipping it', function()

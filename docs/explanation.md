@@ -153,15 +153,30 @@ so a function that runs once, but briefly, never appears.
 
 The part that shapes the design is where the code runs. A plugin's code mostly
 runs in the child editors, not in the process running the specs, so a hook in
-the host alone would report it as never run. Each child therefore installs the
-same hook as it starts, and `Nvim:stop()` reads the child's lines back before
-stopping it. The report merges the host's lines with every child's.
+the host alone would report it as never run. A plugin's `nvim -l` script is a
+third place code runs.
 
-One rule keeps the numbers honest. A function that ends in `error(...)` still
-gets an implicit return instruction on its closing `end`, and that instruction
-can never run, so the line would always show as missed. The report leaves out
-a closing `end` whose only instruction is that implicit return; the line
-before it already shows whether the function got that far.
+Every such process gets its lines back to the host in one way. `Nvim.start`
+and `Nvim.script` install the same hook with `--cmd`, before any of the
+plugin's code can load, and the process writes its lines to a file in the
+run's directory as it exits. A child exits when `Nvim:stop()` closes its
+channel, and `Nvim:stop()` waits for that exit, so the file is complete
+before the run reads it. A script usually sets its exit status with
+`os.exit`, which skips `VimLeavePre`, so the hook also wraps `os.exit` to
+write the file first. When the run ends, the report combines the host's lines
+and every file's lines per file.
+
+A child's RPC channel could carry its lines back instead, but a script has no
+such channel. One way back for both means one path to install the hook, one
+to collect the lines, and one failure rule: a process that crashes loses its
+lines.
+
+Every line that holds an instruction counts, with no exceptions. A function
+that ends in `error(...)` looks like it needs one: its closing `end` holds a
+return instruction that can never run. LuaJIT, however, also puts the
+instruction that creates the function on that line, in the enclosing
+function, so the line runs whenever the definition does, and it never shows
+as missed for a function that was defined.
 
 ## Why the library is one module
 

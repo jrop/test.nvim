@@ -8,6 +8,8 @@ Shared test helpers for Neovim plugin specs:
   `nvim --headless --embed -n -u NORC`; the handle supports `request`, `notify`,
   `run`, `run_async` (which returns a `test.Pending` with `wait` and
   `on_settled`), `input`, `screen`, `drain`, `wait_until`, and `stop`.
+  `Nvim.script` runs a plain `nvim -l` script and returns its
+  `vim.SystemCompleted`.
 - **`lua/test/assert.lua`** — Node-style assertions in one callable namespace:
   `ok`, `is_nil`, `equal`, `not_equal`, `deep_equal`, `not_deep_equal`,
   `contains`, `matches`, and `raises`. Every failure prints the shortest line
@@ -15,8 +17,8 @@ Shared test helpers for Neovim plugin specs:
 - **`lua/test/runner.lua`** — the spec API (`describe`, `it`, `pending`,
   `before_all`, `after_all`, `before_each`, `after_each`) and the runner that
   collects and runs it.
-- **`lua/test/coverage.lua`** — `--coverage`: line hooks in the host and every
-  child, and the per-file report.
+- **`lua/test/coverage.lua`** — `--coverage`: line hooks in the host, every
+  child, and every `Nvim.script` process, and the per-file report.
 - **`lua/test/color.lua`** — ANSI styling, on for a terminal or with `--color`.
 - **`lua/test/cli.lua`** — the `nvim -l` command line: argument parsing,
   spec discovery with `vim.glob`, and the exit status.
@@ -90,12 +92,25 @@ nvim -u NONE -i NONE -l lua/test/init.lua --filter 'run_async'
   counts each outcome and prints it in the same step. The collecting scope is
   a module local.
 - **`lua/test/coverage.lua`** — hits recorded by one line-hook function,
-  `record_lines`, which runs in the host and, through `Nvim:run` at start, in
-  every child; `Nvim:stop()` reads a child's hits back. Executable lines come
-  from `jit.util` bytecode walks, without a function's implicit closing `RET0`.
-  The recording flag is a module local; the hits live in the global
-  `__test_coverage_hits` in each process, because `record_lines` also runs in
-  children, which do not load the library.
+  `record_lines`, in the host and in every other process. Children and
+  scripts get their hits back to the host the same way: `argv` hands
+  `record_lines`, `export_hits`, and `write_at_exit` to the process as escaped
+  bytecode in one `--cmd`, and the process writes its hits as JSON into the
+  run's directory on `VimLeavePre` or `os.exit`. `Nvim:stop()` closes a
+  child's channel and waits for it to exit, so its file is complete. `stop`
+  reads every file plus the host's own hits and returns them, and `cli.main`
+  passes them to `report`, which alone unions them per file. `export_hits`
+  makes each path absolute in the process that recorded it, because only that
+  process knows its cwd. Executable lines come from `jit.util` bytecode
+  walks: every line that holds an instruction, minus the lines between
+  luacov's `-- luacov: disable` and `-- luacov: enable` marker lines, which
+  `coverage.lua` itself uses for the lines a hook cannot record (its own body,
+  and the lines that run while it is off). A run's state is its
+  directory, a local that is nil when not recording, and the hook `start`
+  found, which `stop` puts back so a run nested in another (a `--coverage`
+  spec run through `Nvim.script`) leaves the outer run recording. A
+  process's live hits are its global `__test_coverage_hits`, because
+  `record_lines` also runs in processes that do not load the library.
 - **`lua/test/cli.lua`** — argument parsing, spec discovery, the color
   decision (`vim.uv.guess_handle(1) == 'tty'`, or `--color`), exit status, and
   `running()`, which is true while `main` runs.
@@ -113,14 +128,16 @@ nvim -u NONE -i NONE -l lua/test/init.lua --filter 'run_async'
   `test.Nvim`.
 - **`spec/runner_spec.lua`** — the runner and command line, checked from
   outside: each case writes a spec project to a temporary directory and runs
-  the CLI on it in a separate `nvim -l`. Those runs write to a pipe, so their
-  output is plain unless the case passes `--color`.
+  the CLI on it in a separate `nvim -l`, through `Nvim.script`, so a coverage
+  run of this repository counts the lines the CLI runs there. Those runs write
+  to a pipe, so their output is plain unless the case passes `--color`.
 - **`spec/assert_spec.lua`** — each assertion's pass and fail cases, failure
   output (including the diff's insertion, deletion, replacement, and
   shortest-diff choice), and the error level that names the spec's line.
 - **`spec/nvim_spec.lua`** — child start/stop and `env`, sync runs, async jobs
   (`wait`, concurrency, errors, timeout, `on_settled`), input, screen, drain,
-  and `wait_until` success and timeout.
+  `wait_until` success and timeout, and `Nvim.script`'s output and exit code.
+  `spec/runner_spec.lua` checks that a coverage run counts a script's lines.
 
 ## Test environment
 

@@ -155,6 +155,10 @@ end
 --- @field name string
 --- @field message string  the error, with the traceback frames in the spec file
 
+--- A case that takes longer than this prints its time beside its name, so the
+--- slow cases stand out. 75 ms is mocha's default for a slow test.
+local SLOW_MS = 75
+
 --- The run's counts and its output: each outcome is counted and printed in
 --- one step, so the two cannot disagree.
 --- @class test.runner.Report
@@ -176,18 +180,33 @@ end
 --- @param path string
 function Report:file(path) io.stdout:write(self.paint('bold', path), '\n') end
 
+--- The text after a case's name: its time, dim, when it ran longer than
+--- `SLOW_MS`, and nothing otherwise.
+--- @param ms number?  nil for a case that never ran, e.g. under a failed before_all
+--- @return string
+function Report:duration(ms)
+  if not ms then return '' end
+  -- Comparing the rounded time keeps the rule and the printed number in
+  -- agreement: 75.4 ms would otherwise print as a slow `(75ms)`.
+  local shown = math.floor(ms + 0.5)
+  if shown <= SLOW_MS then return '' end
+  return ' ' .. self.paint('dim', ('(%dms)'):format(shown))
+end
+
 --- @param name string
-function Report:pass(name)
+--- @param ms number  the case's time, with its before_each and after_each hooks
+function Report:pass(name, ms)
   self.counts.passed = self.counts.passed + 1
-  io.stdout:write('  ', self.paint('green', '✓'), ' ', name, '\n')
+  io.stdout:write('  ', self.paint('green', '✓'), ' ', name, self:duration(ms), '\n')
 end
 
 --- @param name string
 --- @param message string
-function Report:fail(name, message)
+--- @param ms? number  the case's time, with its hooks; nil when it never ran
+function Report:fail(name, message, ms)
   self.counts.failed = self.counts.failed + 1
   table.insert(self.failures, { name = name, message = message })
-  io.stdout:write('  ', self.paint('red', '✗'), ' ', name, '\n')
+  io.stdout:write('  ', self.paint('red', '✗'), ' ', name, self:duration(ms), '\n')
 end
 
 --- A spec file that failed to load or to collect: one failure, named after
@@ -283,6 +302,7 @@ local function run_case(case, path, report)
   local name = full_name(case)
   if not case.fn then return report:pending(name) end
 
+  local started = vim.uv.hrtime()
   local errors = {}
   --- @param fn fun()
   --- @return boolean
@@ -306,8 +326,9 @@ local function run_case(case, path, report)
     end
   end
 
-  if #errors == 0 then return report:pass(name) end
-  report:fail(name, table.concat(errors, '\n\n'))
+  local ms = (vim.uv.hrtime() - started) / 1e6
+  if #errors == 0 then return report:pass(name, ms) end
+  report:fail(name, table.concat(errors, '\n\n'), ms)
 end
 
 --- Whether `filter`, a plain substring of the full case name, selects `case`.

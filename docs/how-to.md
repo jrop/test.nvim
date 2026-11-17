@@ -118,8 +118,39 @@ nvim --clean -l lua/<your-plugin>/vendor/test.lua --coverage
 
 After the summary, the report lists each file under `lua/` with its covered
 share of lines and the lines that never ran. Stop every child you start, with
-`nv:stop()` in an `after_each`, because a child's lines are read back when it
-stops.
+`nv:stop()` in an `after_each`, because a child writes its lines as it exits,
+and a child still running when the run ends contributes nothing.
+
+## Leave code out of coverage
+
+Put the code between two marker lines, the ones luacov reads:
+
+```lua
+-- luacov: disable
+local function only_on_windows()
+  return vim.fn.has 'win32' == 1
+end
+-- luacov: enable
+```
+
+A `disable` with no `enable` after it leaves out the rest of the file. Give
+the region a comment that says why it cannot run under the suite, so the
+next reader can tell a deliberate gap from a forgotten test.
+
+## Test a plugin's `nvim -l` script
+
+Run it with `Nvim.script`, and check its output and exit status:
+
+```lua
+it('rejects a missing file', function()
+  local proc = Nvim.script('lua/my_plugin/cli.lua', { 'missing.txt' })
+  assert.equal(proc.code, 1)
+  assert.contains(proc.stderr, 'missing.txt')
+end)
+```
+
+A coverage run counts the script's lines too, including the lines it reaches
+before an `os.exit`.
 
 ## Mark a case unfinished
 

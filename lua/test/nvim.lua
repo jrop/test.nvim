@@ -33,7 +33,8 @@ function Nvim.start(opts)
   --- @cast opts test.NvimStartOpts
 
   --- @type string[]
-  local argv = { vim.v.argv[1], '--headless', '--embed', '-n', '-u', 'NORC' }
+  local argv = { vim.v.progpath, unpack(coverage.argv()) }
+  vim.list_extend(argv, { '--headless', '--embed', '-n', '-u', 'NORC' })
   if opts.columns then
     vim.list_extend(argv, { '--cmd', ('set columns=%d'):format(opts.columns) })
   end
@@ -46,13 +47,27 @@ function Nvim.start(opts)
   -- No readiness wait is needed: a request sent before the child is ready waits
   -- in the pipe until the child reads it. 100 starts, each followed at once by
   -- a request, all succeeded.
-  coverage.start_in(self)
 
   -- Add repo to child rtp.
   local rtp = opts.rtp or vim.fn.getcwd()
   self:request('nvim_command', 'set rtp+=' .. vim.fn.escape(rtp, ' '))
 
   return self
+end
+
+--- Run `nvim -l <path> <args...>` under the suite's own Neovim, and wait for it
+--- to exit. A script that owns its process (its stdout, its exit status) cannot
+--- run in an `--embed` child, because the child's stdio is the RPC channel.
+--- `-l` already skips the user's config, plugins, and shada, so the command
+--- needs no isolating flags.
+--- @param path string
+--- @param args? string[]  the script's `arg[1]`, `arg[2]`, ...
+--- @param opts? vim.SystemOpts  passed to `vim.system`; `text` defaults to true
+--- @return vim.SystemCompleted
+function Nvim.script(path, args, opts)
+  local cmd = { vim.v.progpath, unpack(coverage.argv()) }
+  vim.list_extend(cmd, { '-l', path, unpack(args or {}) })
+  return vim.system(cmd, vim.tbl_extend('keep', opts or {}, { text = true })):wait()
 end
 
 --- @param method string
@@ -239,11 +254,17 @@ function Nvim:wait_until(pred, timeout_ms, msg)
   error(msg or ('wait_until: the predicate did not hold within %d ms'):format(timeout_ms), 2)
 end
 
---- Stop the child. Safe to call more than once. During a coverage run, the
---- child's recorded lines are read back first.
+--- Stop the child, and wait for it to exit. Safe to call more than once.
 function Nvim:stop()
-  coverage.collect(self)
-  vim.fn.jobstop(self.chan)
+  -- A child that already exited, e.g. on a second stop, has nothing to close.
+  if vim.fn.jobwait({ self.chan }, 0)[1] ~= -1 then return end
+  -- Closing the channel makes the child exit normally, which fires its
+  -- `VimLeavePre`, where a coverage run writes the child's hits; waiting
+  -- for the exit makes those hits complete before the run reads them. A child
+  -- stuck in a busy loop never reads the close, so after the same 2000 ms that
+  -- `wait_until` allows by default, it is killed without its hits.
+  vim.fn.chanclose(self.chan)
+  if vim.fn.jobwait({ self.chan }, 2000)[1] == -1 then vim.fn.jobstop(self.chan) end
 end
 
 return Nvim

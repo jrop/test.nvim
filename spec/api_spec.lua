@@ -65,6 +65,7 @@ describe('public API', function()
       'run',
       'run_async',
       'screen',
+      'script',
       'start',
       'stop',
       'wait_until',

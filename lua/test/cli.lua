@@ -173,8 +173,8 @@ function M.main(argv)
   if parsed['--coverage'] then coverage.start() end
   local report = require('test.runner').run(paths, { filter = parsed['--filter'], paint = paint })
   if parsed['--coverage'] then
-    coverage.stop()
-    coverage.report(coverage_paths(), paint)
+    local run = coverage.stop()
+    coverage.report(run, coverage_paths(), paint)
   end
   return report.counts.failed > 0 and 1 or 0
 end
