@@ -136,13 +136,20 @@ end
 --- or none when not recording. They go before any other argument: `--cmd`
 --- runs before the user's config and before a `-l` script's first line, so
 --- the hook is in place before any of a plugin's code can load.
+---
+--- The open run is this process's own, or else the run that instrumented
+--- this process, whose directory the `--cmd` left in the global
+--- `__test_coverage_dir`. So a process a run measures also measures the
+--- processes it starts, such as an isolated worker's child editors.
 --- @return string[]
 function M.argv()
-  if not run_dir then return {} end
-  local chunk = ('lua %s(); %s(%q, %s)'):format(
+  local dir = run_dir or _G.__test_coverage_dir
+  if not dir then return {} end
+  local chunk = ('lua __test_coverage_dir = %q; %s(); %s(%q, %s)'):format(
+    dir,
     loader(record_lines),
     loader(write_at_exit),
-    run_dir,
+    dir,
     loader(export_hits)
   )
   return { '--cmd', chunk }

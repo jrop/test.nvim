@@ -45,6 +45,8 @@ child harness (`Nvim`), the assertions (`assert`), and the spec API
 (`describe`, `it`, `pending`, `before_all`, `after_all`, `before_each`,
 `after_each`). Run with `nvim -l`,
 it finds and runs your specs, so a plugin's tests need nothing but Neovim.
+With `--isolate file` or `--isolate case`, it runs them in parallel processes,
+so a case that crashes or hangs fails alone instead of killing the run.
 
 ## Documentation
 

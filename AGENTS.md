@@ -14,17 +14,32 @@ Shared test helpers for Neovim plugin specs:
   `ok`, `is_nil`, `equal`, `not_equal`, `deep_equal`, `not_deep_equal`,
   `contains`, `matches`, and `raises`. Every failure prints the shortest line
   diff of two values, built from a Levenshtein table without replacement.
-- **`lua/test/runner.lua`** — the spec API (`describe`, `it`, `pending`,
-  `before_all`, `after_all`, `before_each`, `after_each`) and the runner that
-  collects and runs it.
+- **`lua/test/suite.lua`** — the spec API (`describe`, `it`, `pending`,
+  `before_all`, `after_all`, `before_each`, `after_each`) and the `Suite` it
+  collects into.
+- **`lua/test/executor.lua`** — the two ways to run a suite: `in_process`,
+  and `spawner` (`--isolate`, `--jobs`), which runs jobs in worker processes,
+  times them, and kills their process groups; and the worker, which runs one
+  job with `in_process`.
+- **`lua/test/report.lua`** — the report, which prints a run's events.
 - **`lua/test/coverage.lua`** — `--coverage`: line hooks in the host, every
   child, and every `Nvim.script` process, and the per-file report.
+- **`lua/test/dto.lua`** — guard schemas for a run's events, which every
+  executor emits and the report consumes, and for what crosses between the
+  parent and a worker: the job file and the worker's lines. `mise run generate`
+  writes `dto.types.lua` from it; that file is git-ignored. It is annotations
+  only, so a local `nvim-bundle build test` passes
+  `--exclude '**/*.types.lua'`; a clone never has the file.
 - **`lua/test/color.lua`** — ANSI styling, on for a terminal or with `--color`.
 - **`lua/test/cli.lua`** — the `nvim -l` command line: argument parsing,
   spec discovery with `vim.glob`, and the exit status.
-- **`lua/test/vendor/args.lua`** — argument parser vendored by
-  `nvim-bundle install jrop/args.nvim args` and recorded in
-  `nvim-bundle.json`. Do not edit it; rerun `nvim-bundle install` instead.
+- **`lua/test/vendor/args.lua`** and **`lua/test/vendor/guard.lua`** —
+  the argument parser and the schema library, vendored by `nvim-bundle install`
+  and recorded in `nvim-bundle.json`. Do not edit them; rerun
+  `nvim-bundle install` instead. guard's entry excludes
+  `guard/vendor/test.lua`, because guard's own release would otherwise inline
+  an old copy of this library, whose `test.*` classes the type checker would
+  report as duplicates of ours.
 - **`lua/test/init.lua`** — the library's one public surface,
   `{ Nvim, assert, describe, it, pending, before_all, after_all, before_each,
   after_each }`. Executed
@@ -59,7 +74,9 @@ All tasks use `mise`:
 
 - `mise run fmt` — format with stylua
 - `mise run fmt:check` — check formatting
-- `mise run lint` — type-check with `emmylua_check` (warnings are errors)
+- `mise run generate` — write `lua/test/dto.types.lua` from the guard schemas
+- `mise run lint` — `generate`, then type-check with `emmylua_check`
+  (warnings are errors)
 - `mise run test` — run the specs with the library's own runner
 - `mise run test:coverage` — the same, with a line-coverage report
 - `mise run ci` — `fmt:check` → `lint` → `test`
@@ -72,6 +89,7 @@ Run one spec file, or part of one, directly:
 ```sh
 nvim -u NONE -i NONE -l lua/test/init.lua spec/nvim_spec.lua
 nvim -u NONE -i NONE -l lua/test/init.lua --filter 'run_async'
+nvim -u NONE -i NONE -l lua/test/init.lua --isolate case
 ```
 
 ## Architecture
@@ -86,17 +104,47 @@ nvim -u NONE -i NONE -l lua/test/init.lua --filter 'run_async'
   table without replacement, over suffixes, and walks it forward. Strings and
   lists of strings print one quoted entry per line, because `vim.inspect`
   prints a list on one line.
-- **`lua/test/runner.lua`** — the tree of scopes and cases, built while a spec
-  file loads, and the run: hooks outer to inner before a case and inner to
-  outer after it, the module reset after each file, and the `Report` that
-  counts each outcome and prints it in the same step. The collecting scope is
-  a module local.
+- **`lua/test/suite.lua`** — the tree of scopes and cases, built while a spec
+  file loads, and the `Suite`, i.e., every file's tree (or load error), the
+  ids chosen from it, and the modules its collection loaded.
+  `suite:select(keep)` returns a suite with fewer chosen cases, and
+  `with_modules(file, fn)` puts a file's modules back while `fn` runs and
+  removes them after, so its top level and its cases share instances. It also
+  owns `protect`, which formats a spec's errors for collection and running
+  alike. The collecting scope is a module local.
+- **`lua/test/report.lua`** — consumes events and prints them, counting each
+  outcome in the same step, and prints the summary.
+- **`lua/test/executor.lua`** — three chapters. **In process:**
+  `in_process(run, emit)` runs each file's chosen cases inside
+  `with_modules`, emitting `test.dto.Event`s: hooks outer to inner before a
+  case and inner to outer after it. It is the only code that runs cases.
+  **The worker** runs one job with `in_process`. **The spawner**,
+  `spawner(opts)(run, emit)`, groups each
+  file's chosen ids into jobs (per file or per case) and hands each worker a
+  job file of `{ path, ids }`. A worker is `nvim -l <test.lua> --worker <dir>`
+  (the flag is accepted but not in the usage), with the parent's flags from
+  before `-l` (from `vim.v.argv`); it runs its job with `in_process` and
+  writes each event as a flushed JSON line with the output file's offset,
+  dropping `file` events because the parent owns file boundaries. Its merged
+  stdout and stderr go to one file. A file that fails to load in a worker
+  raises, which the parent reports like any worker that died outside a case.
+  Nothing checks that a worker's collection matches the parent's. The parent
+  waits on exit callbacks, never polls: a `--timeout` timer re-arms for the
+  deadline after the lines file's modification time. After any exit it kills
+  the worker's process group (`detached = true`), and a `VimLeavePre` autocmd
+  kills every live group when the parent dies on a signal. A worker that died
+  fails the case it was running, and every case it never reported fails with
+  `did not run`; there are no restarts. Files are emitted in order once they
+  and all earlier files finish.
 - **`lua/test/coverage.lua`** — hits recorded by one line-hook function,
   `record_lines`, in the host and in every other process. Children and
   scripts get their hits back to the host the same way: `argv` hands
   `record_lines`, `export_hits`, and `write_at_exit` to the process as escaped
   bytecode in one `--cmd`, and the process writes its hits as JSON into the
-  run's directory on `VimLeavePre` or `os.exit`. `Nvim:stop()` closes a
+  run's directory on `VimLeavePre` or `os.exit`. The `--cmd` also sets the
+  global `__test_coverage_dir`, which `argv` falls back to when the process
+  has no run of its own, so a measured process (e.g. an isolated worker)
+  measures the processes it starts. `Nvim:stop()` closes a
   child's channel and waits for it to exit, so its file is complete. `stop`
   reads every file plus the host's own hits and returns them, and `cli.main`
   passes them to `report`, which alone unions them per file. `export_hits`
@@ -130,7 +178,11 @@ nvim -u NONE -i NONE -l lua/test/init.lua --filter 'run_async'
   outside: each case writes a spec project to a temporary directory and runs
   the CLI on it in a separate `nvim -l`, through `Nvim.script`, so a coverage
   run of this repository counts the lines the CLI runs there. Those runs write
-  to a pipe, so their output is plain unless the case passes `--color`.
+  to a pipe, so their output is plain unless the case passes `--color`. Its
+  `isolation` scope checks that isolated runs report the same as a serial
+  one, and covers crashes, `os.exit`, `--timeout`, leaked processes, output
+  attribution, a file that fails to load only in a worker, and coverage
+  through workers.
 - **`spec/assert_spec.lua`** — each assertion's pass and fail cases, failure
   output (including the diff's insertion, deletion, replacement, and
   shortest-diff choice), and the error level that names the spec's line.

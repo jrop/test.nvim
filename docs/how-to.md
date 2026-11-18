@@ -66,6 +66,53 @@ nvim --clean -l lua/<your-plugin>/vendor/test.lua --filter 'renders a tag'
 `it` name joined by spaces, contains the text. Quote globs, so the shell does
 not expand them first.
 
+## Run the suite in parallel
+
+Add `--isolate file` to run each spec file in its own process, as many at once
+as you have CPUs:
+
+```sh
+nvim --clean -l lua/<your-plugin>/vendor/test.lua --isolate file
+```
+
+When one file holds most of the suite's time, run each case in its own
+process instead:
+
+```sh
+nvim --clean -l lua/<your-plugin>/vendor/test.lua --isolate case
+```
+
+Add `-j <n>` to cap the processes at `<n>`. The report prints in file order,
+the same as a run in one process.
+
+Two things must hold for a parallel run to pass where a serial one does:
+
+1. A file must declare the same cases, in the same order, every time it loads,
+   because each worker loads it again and runs its cases by position. Build
+   case names from literals or from sorted lists, never from `pairs()`, the
+   clock, or the file system.
+2. Files that run at once must not share a fixed path, a port, or other state
+   outside the process. Make each fixture with `vim.fn.tempname()`.
+
+## Find the case that crashes the run
+
+When the run dies with a signal, such as `killed by SIGSEGV`, and prints no
+summary, rerun it isolated, with a timeout in case a case hangs:
+
+```sh
+nvim --clean -l lua/<your-plugin>/vendor/test.lua --isolate file --timeout 10000
+```
+
+The case whose worker crashed fails with `the worker was killed by signal
+<n>`, and its output follows under `output:`. A case that calls `os.exit`
+fails the same way, with `the worker exited with code <n>`. The cases after
+it in the same file fail with `did not run`, because they shared the dead
+worker; add `--isolate case` instead to give each case its own worker and its
+own result.
+
+Add `-j 1` to run one worker at a time, which keeps the crash from racing
+other workers when it depends on the machine's load.
+
 ## Share setup between cases
 
 Put the setup in `before_each` and the cleanup in `after_each`, inside the
@@ -120,6 +167,9 @@ After the summary, the report lists each file under `lua/` with its covered
 share of lines and the lines that never ran. Stop every child you start, with
 `nv:stop()` in an `after_each`, because a child writes its lines as it exits,
 and a child still running when the run ends contributes nothing.
+
+`--coverage` combines with `--isolate`, which counts the lines each worker
+runs. A worker that `--timeout` kills contributes nothing.
 
 ## Leave code out of coverage
 

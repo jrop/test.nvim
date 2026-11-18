@@ -178,6 +178,66 @@ instruction that creates the function on that line, in the enclosing
 function, so the line runs whenever the definition does, and it never shows
 as missed for a function that was defined.
 
+## Why isolated workers report through files
+
+A run in one process -- under normal circumstances, the default -- cannot
+survive its own death. An example of this is a case that dereferences a null
+pointer through the FFI: the signal kills the runner, so the summary, with
+every failure's message, is never printed. `--isolate` moves the cases into
+worker processes, so that a death costs one case instead of the run, and so
+that workers can run in parallel.
+
+A worker writes everything the parent needs into two files. The first holds
+one JSON line per event: a case started, passed, failed, or is pending. The
+worker flushes each line, so a worker that crashes has still reported
+everything before the crash. The second file is the worker's stdout and its
+stderr at once. Both descriptors point at one file, so every writer moves one
+offset: `print`, `io.write`, and any process a spec starts. Each event records
+that offset, so the bytes between two events are what ran between them.
+
+The obvious alternatives each break one of those properties:
+
+1. An RPC channel, as with `Nvim.start`, uses stdout as its transport, so a
+   spec's `io.write` would corrupt it.
+2. Events framed inside stdout lose their order relative to `print`, because
+   `print` under `nvim -l` writes to stderr, and a pipe cannot join the two
+   streams in order.
+3. A pipe on a third descriptor needs its own spawn plumbing, and every
+   process a spec starts inherits it.
+
+So a crash is diagnosed from the files alone. The parent reads the last case
+that started without finishing, i.e., the case that was running when the
+worker died, and fails it with the signal or the exit code. Every case the
+worker never reported fails with `did not run`: those cases shared the
+process that died, and isolating them from each other is what
+`--isolate case` is for.
+
+The worker itself runs cases exactly as a run in one process does. There is
+one way to run cases, the in-process executor, and `--isolate` only changes
+where it runs: the spawner splits the suite into jobs, and each worker runs
+its job with the in-process executor, writing each event as a line instead of
+printing it. Both executors emit the same events, in file order, so one
+report consumes either.
+
+The parent collects every file itself, before any worker starts. It then owns
+the names, the filter, and the ids, and it hands each worker only ids. This is
+what makes determinism a requirement: a worker that collects a different tree
+runs different cases under the same ids, and the parent reports them under the
+names from its own tree. Nothing detects the mismatch, so the requirement is
+the spec author's to keep.
+
+`--timeout` measures progress, not duration. The parent arms a timer for
+`<ms>` after the events file last changed, and it kills the worker only when that timer
+fires with no newer event. That is the same as a per-case limit, because a
+worker writes an event as each case starts and ends, and it needs no polling
+interval to tune.
+
+Each worker leads its own process group, and the parent kills the whole group
+whenever a worker exits. A spec that starts a process and forgets it, or a
+case killed mid-way, then leaves nothing running. The cost is that a
+terminal's Ctrl-C no longer reaches the workers directly, so the parent kills
+the groups itself when it dies on a signal.
+
 ## Why the library is one module
 
 A consumer reaches every helper through `require 'test'`. The reason is

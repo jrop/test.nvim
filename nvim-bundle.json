@@ -4,6 +4,14 @@
       "entry": "args",
       "ref": "v0.1.0",
       "repo": "jrop/args.nvim"
+    },
+    "guard": {
+      "entry": "guard",
+      "exclude": [
+        "guard/vendor/test.lua"
+      ],
+      "ref": "v0.2.0",
+      "repo": "jrop/guard.nvim"
     }
   },
   "name": "test"

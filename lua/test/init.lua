@@ -32,17 +32,17 @@ if is_script() then
   if not cli.running() then os.exit(cli.main(arg)) end
 end
 
-local runner = require 'test.runner'
+local suite = require 'test.suite'
 
 --- @class test
 return {
   Nvim = require 'test.nvim',
   assert = require 'test.assert',
-  describe = runner.describe,
-  it = runner.it,
-  pending = runner.pending,
-  before_all = runner.before_all,
-  after_all = runner.after_all,
-  before_each = runner.before_each,
-  after_each = runner.after_each,
+  describe = suite.describe,
+  it = suite.it,
+  pending = suite.pending,
+  before_all = suite.before_all,
+  after_all = suite.after_all,
+  before_each = suite.before_each,
+  after_each = suite.after_each,
 }

@@ -18,7 +18,8 @@ built by nvim-bundle 0.4.1 or newer.
 ## Command line
 
 ```text
-nvim -l <test.lua> [<path or glob>...] [--exclude <glob>]... [--filter <text>] [--coverage] [--color] [-h | --help]
+nvim -l <test.lua> [<path or glob>...] [--exclude <glob>]... [--filter <text>] [--coverage]
+                   [--isolate file|case] [-j | --jobs <n>] [--timeout <ms>] [--color] [-h | --help]
 ```
 
 `<test.lua>` is `lua/test/init.lua` in a checkout, or the vendored file.
@@ -32,20 +33,32 @@ nvim -l <test.lua> [<path or glob>...] [--exclude <glob>]... [--filter <text>] [
 | `--exclude <glob>` | Skips the included paths that match. Repeatable. |
 | `--filter <text>` | Runs only the cases whose full name contains `<text>` as a plain substring. A full name is the enclosing `describe` names and the case's name, joined by spaces. |
 | `--coverage` | Reports line coverage after the run. See [Coverage](#coverage). |
+| `--isolate file` | Runs each file in its own process, several at once. See [Isolation](#isolation). |
+| `--isolate case` | Runs each case in its own process, several at once. |
+| `-j <n>`, `--jobs <n>` | Runs at most `<n>` processes at once. The default is `vim.uv.available_parallelism()`. Without `--isolate`, implies `--isolate file`. |
+| `--timeout <ms>` | Kills an isolated process that writes no event for `<ms>` milliseconds. Requires `--isolate` or `--jobs`, because a case running in this process cannot be stopped. |
 | `--color` | Colors the output even when stdout is not a terminal. |
 | `-h`, `--help` | Prints the usage and exits. |
 
 Before the run, `lua/?.lua` and `lua/?/init.lua` are prepended to
 `package.path`, relative to the current directory.
 
-Files run one at a time, in sorted order. After each file, the modules that the
-file loaded are removed from `package.loaded`.
+Every file is loaded and collected first, in sorted order, before any case
+runs, as in mocha. A file's top-level code, and the `describe` bodies, have
+therefore run for every file by the time the first case runs. A file keeps
+the modules its collection loaded: they are removed from `package.loaded`
+after it is collected, put back while its cases run, and removed again after,
+together with any module its cases loaded. So a file's top level and its cases
+share one instance of each module, and no file sees another file's modules.
+
+Without `--isolate` or `--jobs`, the cases then run in this process, one file
+at a time, in sorted order.
 
 | Exit status | Meaning |
 | --- | --- |
 | 0 | Every case that ran passed. |
 | 1 | A case failed, a file failed to load or collect, or no files matched. |
-| 2 | An argument was invalid: an unknown option, or a glob that does not parse. |
+| 2 | An argument was invalid: an unknown option, a glob that does not parse, an `--isolate` other than `file` or `case`, a `--jobs` or `--timeout` that is not a whole number above 0, or a `--timeout` without `--isolate` or `--jobs`. |
 
 ### Output
 
@@ -54,7 +67,9 @@ For each file, the runner prints the file's path, then one line per case:
 A case that took longer than 75 ms, counting its `before_each` and `after_each`
 hooks, has its time after its name, such as `✓ loads the index (120ms)`.
 After all files, it prints each failure's full name and error, followed by the
-error's traceback frames that name the spec file. The last line is
+error's traceback frames that name the spec file. In an isolated run, a
+failure is also followed by `output:` and what was printed while it ran, when
+anything was. The last line is
 `<n> passed, <n> failed, <n> pending in <seconds>s`.
 
 The output is colored when stdout is a terminal, or when `--color` is given:
@@ -71,6 +86,34 @@ The output is colored when stdout is a terminal, or when `--color` is given:
 | a non-zero count in the last line | green for passed, red for failed, yellow for pending |
 | a coverage share | green when every line ran, yellow otherwise |
 | a coverage row's missed lines | dim |
+| a failure's `output:` header | dim |
+
+### Isolation
+
+With `--isolate` or `--jobs`, the cases run in worker processes, and this
+process only schedules them and prints the report.
+
+| Rule | Detail |
+| --- | --- |
+| Collection | This process loads and collects every file first. It applies `--filter`, and it gives every case an id, which is the case's place in its file's collection order. |
+| Determinism | Each worker collects its file again and runs the cases by id. Collection must therefore build the same tree in every process: the cases a file declares, their order, and their names must not depend on time, randomness, the environment, a directory listing's order, `pairs()` order, or what an earlier process left on disk. Nothing checks this: a worker that collects a different tree runs other cases, which the report shows under the parent's names. |
+| Units | `--isolate file` starts one worker per file, with every selected case. `--isolate case` starts one worker per selected case, pending cases included. |
+| Workers | A worker is the same `nvim` binary, started with the flags that came before `-l` in this process, running the same `<test.lua>` with `--worker <dir>`, where `<dir>` holds its job. It inherits this process's environment and current directory. |
+| Hooks | `before_all` and `after_all` run once per scope in each worker. Under `--isolate case`, that is once per case, and an `after_all` that raises is reported once per case. |
+| Order | A file's report prints once that file and every file before it have finished, so the report reads in sorted order, as in a run in one process. |
+| Output | A worker's stdout and stderr go to one file, so `print` (stderr under `nvim -l`) and `io.write` (stdout) keep the order they ran in. A failure shows the bytes written since the worker's previous event, as written: for a failing case, from its start; for a case failed by a `before_all`, the `before_all`'s output. `print` writes its newline before the next message, so a case's output can open with the newline of the previous case's `print`. Passing cases show nothing. |
+| A worker that dies | A worker that exits with a signal, exits with a nonzero code, or exits before reporting every case fails the case it was running, with the reason and the worker's output. When no case was running, e.g. in a `before_all`, or when the file failed to load in the worker, the file fails under its own name instead. Every case the worker was given and never reported fails with `did not run: <reason>`. To give every case its own result regardless, use `--isolate case`. |
+| Timeout | With `--timeout <ms>`, a worker that writes no event for `<ms>` is killed, and the case it was running fails with `timed out: the worker wrote nothing for <ms> ms`. A worker writes an event as each case starts and as each ends, so the limit applies to each case with its `before_each` and `after_each` hooks, and to the time spent loading the file and in `before_all` hooks. |
+| Cleanup | Each worker runs in its own process group. When a worker exits, the whole group is killed, so a process a spec started and left running does not outlive its worker. When this process exits on a signal, it kills the groups of the workers still running. A process that starts its own session or group escapes this. Process groups are a POSIX mechanism, so cleanup is untested on Windows. |
+| Coverage | `--coverage` records each worker into the run. A worker killed by `--timeout` or a signal contributes nothing. |
+
+Reasons a worker's case fails:
+
+| Reason | Cause |
+| --- | --- |
+| `the worker was killed by signal <n>` | The worker crashed, e.g. `11` for a segmentation fault. |
+| `the worker exited with code <n>` | The worker exited early, e.g. through `os.exit`, including `os.exit(0)`. |
+| `timed out: the worker wrote nothing for <ms> ms` | `--timeout` elapsed. |
 
 ### Coverage
 
@@ -86,9 +129,9 @@ Coverage
 
 | Rule | Detail |
 | --- | --- |
-| Files reported | Every `lua/**/*.lua` file under the current directory, except paths containing `/vendor/`. A file that never loaded is reported with its lines missed. |
+| Files reported | Every `lua/**/*.lua` file under the current directory, except paths containing `/vendor/` and type stubs, i.e., files whose first line is `---@meta`. A file that never loaded is reported with its lines missed. |
 | Lines counted | Every line that holds a bytecode instruction, in the main chunk and in every nested function. A function's closing `end` line holds the instruction that creates the function, so it counts as run whenever the definition runs. |
-| Child and script lines | `Nvim.start` and `Nvim.script` install the line hook with `--cmd`, so the hook is in place before any of the plugin's code, or a script's first line, can run. The process writes its lines to a file in a temporary directory when it exits, whether it is stopped, returns, or calls `os.exit`, and the report reads them when the run ends. A process that crashes, is killed, or is still running when the run ends contributes nothing. |
+| Child and script lines | `Nvim.start` and `Nvim.script` install the line hook with `--cmd`, so the hook is in place before any of the plugin's code, or a script's first line, can run. The process writes its lines to a file in a temporary directory when it exits, whether it is stopped, returns, or calls `os.exit`, and the report reads them when the run ends. A process that crashes, is killed, or is still running when the run ends contributes nothing. A measured process also measures the processes it starts with `Nvim.start` and `Nvim.script`, such as an isolated worker's child editors. |
 | Disabled lines | Lines after a `-- luacov: disable` line are not counted, until a `-- luacov: enable` line or the end of the file. A marker must be the whole line, apart from indentation. The scan reads lines, not Lua, so a line inside a multi-line string that is exactly a marker also counts as one. |
 | Exit status | Unaffected; coverage does not fail a run. |
 

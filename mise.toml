@@ -42,17 +42,30 @@ VIMRUNTIME = { value = "{{ exec(command='nvim --clean --headless +\"lua io.stdou
 ################################################################################
 
 [tasks]
-lint = "emmylua_check --warnings-as-errors ."
 fmt = "stylua ."
 "fmt:check" = "stylua --check ."
+
+# The schemas are the source of truth for the DTO types, so the generated file
+# is a build artifact and git-ignored. mise skips the task while the output is
+# newer than every source, because guard's output is not byte-stable across
+# runs and cannot be compared by content.
+[tasks.generate]
+description = "Generate LuaCATS types from the guard schemas"
+sources = ["lua/test/dto.lua", "lua/test/vendor/guard.lua"]
+outputs = ["lua/test/dto.types.lua"]
+run = "nvim --clean -l lua/test/vendor/guard.lua --module test.vendor.guard lua/test/dto.lua"
+
+[tasks.lint]
+depends = ["generate"]
+run = "emmylua_check --warnings-as-errors ."
 
 # The library runs its own specs: `nvim -l lua/test/init.lua` is the same
 # command line a vendored copy offers its consumers.
 [tasks.test]
-run = "nvim -u NONE -i NONE -l lua/test/init.lua"
+run = "nvim -u NONE -i NONE -l lua/test/init.lua --isolate=case"
 
 [tasks."test:coverage"]
-run = "nvim -u NONE -i NONE -l lua/test/init.lua --coverage"
+run = "nvim -u NONE -i NONE -l lua/test/init.lua --coverage --isolate=case"
 
 [tasks.ci]
 run = '''

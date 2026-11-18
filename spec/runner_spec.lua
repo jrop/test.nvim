@@ -275,6 +275,23 @@ end)
     assert.equal(code, 0, out)
   end)
 
+  it("shares a module between a file's top level and its cases", function()
+    local spec = HEADER
+      .. [[
+local counter = require 'counter'
+it('sees the same instance', function() assert.equal(require 'counter', counter) end)
+]]
+    local dir = project {
+      ['lua/counter.lua'] = 'return {}',
+      ['spec/a_spec.lua'] = spec,
+      ['spec/b_spec.lua'] = spec,
+    }
+    for _, argv in ipairs { {}, { '--isolate', 'file' } } do
+      local code, out = cli(dir, argv)
+      assert.equal(code, 0, out)
+    end
+  end)
+
   it('rejects it without a function', function()
     local dir = project {
       ['spec/bad_spec.lua'] = HEADER .. "it('has no body')\n",
@@ -477,6 +494,18 @@ it('calls it', function() assert.ok(not pcall(require('fail').fail)) end)
     assert.contains(out, 'lua/fail.lua  100.0%  5/5\n')
   end)
 
+  it('leaves type stubs, i.e., files that open with ---@meta, out of coverage', function()
+    local dir = project {
+      ['lua/mod.lua'] = 'return {}',
+      ['lua/mod.types.lua'] = '---@meta\n---@class mod.Thing\n---@field name string\n',
+      ['spec/mod_spec.lua'] = HEADER .. "it('loads it', function() require 'mod' end)\n",
+    }
+    local code, out = cli(dir, { '--coverage' })
+    assert.equal(code, 0, out)
+    assert.contains(out, 'lua/mod.lua  100.0%')
+    assert.equal(out:find('mod.types.lua', 1, true), nil, out)
+  end)
+
   it('reports a source file that does not load instead of skipping it', function()
     local dir = project {
       ['lua/broken.lua'] = 'this is not lua (',
@@ -511,5 +540,276 @@ pending('later')
     local code, out = cli(two_files(), { '--help' })
     assert.equal(code, 0)
     assert.contains(out, 'Usage: nvim -l <test.lua>')
+  end)
+end)
+
+describe('isolation', function()
+  -- A report's lines without the times that slow cases print, so two runs of
+  -- the same specs compare equal.
+  local function untimed(out) return (out:gsub(' %(%d+ms%)', ''):gsub(' in [%d.]+s\n', '\n')) end
+
+  it('reports the same as a run in one process, for each unit', function()
+    local dir = project {
+      ['spec/a_spec.lua'] = HEADER .. [[
+describe('math', function()
+  it('adds', function() assert.equal(1 + 1, 2) end)
+  it('fails', function() assert.deep_equal({ 'a' }, { 'b' }) end)
+  pending('later')
+end)
+describe('db', function()
+  after_all(function() error 'cleanup broke' end)
+  it('reads', function() end)
+end)
+describe('setup', function()
+  before_all(function() error 'no connection' end)
+  it('writes', function() end)
+end)
+]],
+      ['spec/b_spec.lua'] = HEADER .. "it('passes', function() end)\n",
+      ['spec/broken_spec.lua'] = 'this is not lua (',
+    }
+    local code, serial = cli(dir)
+    assert.equal(code, 1)
+    for _, argv in ipairs { { '--isolate', 'file' }, { '--isolate', 'case' }, { '-j', '1' } } do
+      local isolated_code, isolated = cli(dir, argv)
+      assert.equal(isolated_code, 1, table.concat(argv, ' '))
+      assert.equal(untimed(isolated), untimed(serial), table.concat(argv, ' '))
+    end
+  end)
+
+  it('prints the files in order when a later file finishes first', function()
+    local dir = project {
+      ['spec/a_spec.lua'] = HEADER .. "it('slow', function() vim.uv.sleep(300) end)\n",
+      ['spec/b_spec.lua'] = HEADER .. "it('fast', function() end)\n",
+    }
+    local code, out = cli(dir, { '-j', '2' })
+    assert.equal(code, 0, out)
+    assert.matches(out, '^spec/a_spec%.lua\n  ✓ slow %(%d+ms%)\nspec/b_spec%.lua\n  ✓ fast\n')
+  end)
+
+  it('runs each file, or with --isolate case each case, in a fresh process', function()
+    local dir = project {
+      ['spec/state_spec.lua'] = HEADER .. [[
+it('sets', function() _G.seen = true end)
+it('sees nothing', function() assert.is_nil(_G.seen) end)
+]],
+    }
+    local file_code = cli(dir, { '--isolate', 'file' })
+    assert.equal(file_code, 1)
+    local case_code, case_out = cli(dir, { '--isolate', 'case' })
+    assert.equal(case_code, 0, case_out)
+  end)
+
+  it('applies --filter in the parent, still listing a file it leaves empty', function()
+    local dir = project {
+      ['spec/a_spec.lua'] = HEADER .. "it('chosen', function() end)\nit('other', error)\n",
+      ['spec/b_spec.lua'] = HEADER .. "it('also other', error)\n",
+    }
+    local code, out = cli(dir, { '--isolate', 'case', '--filter', 'chosen' })
+    assert.equal(code, 0, out)
+    assert.contains(out, 'spec/a_spec.lua\n  ✓ chosen\nspec/b_spec.lua\n')
+    assert.contains(out, '1 passed, 0 failed, 0 pending')
+  end)
+
+  it('fails the case a worker crashes in, with its output, and the cases after it', function()
+    local dir = project {
+      ['spec/crash_spec.lua'] = HEADER .. [[
+it('passes quietly', function() print 'not shown' end)
+it('crashes', function()
+  io.stdout:write 'about to crash\n'
+  require('ffi').cast('int *', 0)[0] = 1
+end)
+it('never runs', function() end)
+]],
+    }
+    local code, out = cli(dir, { '--isolate', 'file' })
+    assert.equal(code, 1)
+    assert.contains(out, '  ✓ passes quietly\n  ✗ crashes\n  ✗ never runs\n')
+    assert.matches(
+      out,
+      '✗ crashes\nthe worker was killed by signal %d+\noutput:\n.-about to crash\n'
+    )
+    assert.matches(out, '✗ never runs\ndid not run: the worker was killed by signal %d+\n')
+    assert.equal(out:find('not shown', 1, true), nil, out)
+  end)
+
+  it('shows the output of a failing case, and only of that case', function()
+    local dir = project {
+      ['spec/out_spec.lua'] = HEADER .. [[
+it('passes', function() print 'quiet' end)
+it('fails', function()
+  print 'first'
+  io.stdout:write 'second\n'
+  error 'boom'
+end)
+]],
+    }
+    local _, out = cli(dir, { '--isolate', 'file' })
+    -- `print` writes to stderr and `io.write` to stdout; both reach one file,
+    -- in the order they ran. `print` writes its newline before the next
+    -- message, so the two lines arrive joined.
+    -- The output is the bytes as written: it opens with the newline of the
+    -- previous case's `print`.
+    assert.matches(out, 'boom\n.-output:\n\nfirstsecond\n')
+    assert.equal(out:find('quiet', 1, true), nil, out)
+  end)
+
+  it('fails a case that exits the worker, instead of passing silently', function()
+    local dir = project {
+      ['spec/exit_spec.lua'] = HEADER .. [[
+it('exits', function() os.exit(0) end)
+it('never runs', function() end)
+]],
+    }
+    local code, out = cli(dir, { '--isolate', 'file' })
+    assert.equal(code, 1)
+    assert.contains(out, '  ✗ exits\n  ✗ never runs\n')
+    assert.contains(out, '✗ exits\nthe worker exited with code 0\n')
+  end)
+
+  it('kills a worker that reports nothing for --timeout ms', function()
+    local dir = project {
+      ['spec/hang_spec.lua'] = HEADER .. [[
+it('is slow, but within the timeout', function() vim.uv.sleep(100) end)
+it('hangs', function() while true do end end)
+it('never runs', function() end)
+]],
+    }
+    local code, out = cli(dir, { '--isolate', 'file', '--timeout', '300' })
+    assert.equal(code, 1)
+    assert.matches(
+      out,
+      '  ✓ is slow, but within the timeout %(%d+ms%)\n  ✗ hangs\n  ✗ never runs\n'
+    )
+    assert.contains(out, '✗ hangs\ntimed out: the worker wrote nothing for 300 ms\n')
+    assert.contains(
+      out,
+      '✗ never runs\ndid not run: timed out: the worker wrote nothing for 300 ms'
+    )
+  end)
+
+  it('kills what a worker started when the worker exits', function()
+    local dir = project {
+      ['spec/leak_spec.lua'] = HEADER .. [[
+it('leaks a process', function()
+  local f = assert(io.open('leaked.pid', 'w'))
+  f:write(vim.system({ 'sleep', '30' }).pid)
+  f:close()
+end)
+]],
+    }
+    local code, out = cli(dir, { '--isolate', 'file' })
+    assert.equal(code, 0, out)
+    local pid = assert(tonumber(vim.fn.readfile(dir .. '/leaked.pid')[1]))
+    -- The orphan is reaped soon after it dies; until then it still has a pid.
+    local gone = vim.wait(2000, function() return vim.uv.kill(pid, 0) ~= 0 end, 20)
+    if not gone then vim.uv.kill(pid, 'sigkill') end
+    assert.ok(gone, 'the leaked process outlived its worker')
+  end)
+
+  it('kills its workers when it dies on a signal', function()
+    local dir = project {
+      ['spec/hang_spec.lua'] = HEADER .. [[
+it('hangs', function()
+  local f = assert(io.open('worker.pid', 'w'))
+  f:write(vim.fn.getpid())
+  f:close()
+  while true do end
+end)
+]],
+    }
+    -- `vim.system`, not `Nvim.script`, because the parent must be signaled
+    -- while it runs.
+    local parent = vim.system({ vim.v.progpath, '-l', INIT, '--isolate', 'file' }, { cwd = dir })
+    local pid_file = dir .. '/worker.pid'
+    local pid --- @type integer?
+    local started = vim.wait(5000, function()
+      pid = vim.uv.fs_stat(pid_file) and tonumber(vim.fn.readfile(pid_file)[1] or '') or nil
+      return pid ~= nil
+    end, 20)
+    if not started then parent:kill 'sigkill' end
+    assert.ok(started, 'the worker never started')
+    parent:kill 'sigterm'
+    parent:wait()
+    local gone = vim.wait(2000, function() return vim.uv.kill(assert(pid), 0) ~= 0 end, 20)
+    if not gone then vim.uv.kill(assert(pid), 'sigkill') end
+    assert.ok(gone, 'the worker outlived its parent')
+  end)
+
+  it('fails the cases a worker never reached, when it dies outside any case', function()
+    local dir = project {
+      ['spec/setup_spec.lua'] = HEADER .. [[
+describe('db', function()
+  before_all(function() require('ffi').cast('int *', 0)[0] = 1 end)
+  it('reads', function() end)
+  it('writes', function() end)
+end)
+]],
+    }
+    local code, out = cli(dir, { '--isolate', 'file' })
+    assert.equal(code, 1)
+    assert.contains(out, '  ✗ spec/setup_spec.lua\n  ✗ db reads\n  ✗ db writes\n')
+    assert.matches(out, '✗ db reads\ndid not run: the worker was killed by signal %d+\n')
+  end)
+
+  it('reports a file that fails to collect only in a worker', function()
+    local dir = project {
+      ['spec/late_spec.lua'] = HEADER .. [[
+local again = vim.uv.fs_stat 'collected' ~= nil
+assert(io.open('collected', 'w')):close()
+if again then error 'broke on the second load' end
+it('passes', function() end)
+]],
+    }
+    local code, out = cli(dir, { '--isolate', 'file' })
+    assert.equal(code, 1)
+    assert.contains(out, 'spec/late_spec.lua\n  ✗ spec/late_spec.lua\n  ✗ passes\n')
+    assert.matches(
+      out,
+      '✗ spec/late_spec%.lua\nthe worker exited with code 1\noutput:\n.-broke on the second load'
+    )
+    assert.contains(out, '✗ passes\ndid not run: the worker exited with code 1\n')
+  end)
+
+  it('counts the lines that workers and their children run, under --coverage', function()
+    local dir = project {
+      ['lua/mod.lua'] = [[
+local M = {}
+function M.worker()
+  return 1
+end
+function M.child()
+  return 2
+end
+return M
+]],
+      ['spec/mod_spec.lua'] = HEADER .. [[
+it('uses the module in the worker and in a child', function()
+  assert.equal(require('mod').worker(), 1)
+  local nv = Test.Nvim.start()
+  assert.equal(nv:run(function() return require('mod').child() end), 2)
+  nv:stop()
+end)
+]],
+    }
+    local code, out = cli(dir, { '--isolate', 'file', '--coverage' })
+    assert.equal(code, 0, out)
+    -- Line 3 runs only in the worker, and line 6 only in the worker's child.
+    assert.contains(out, 'lua/mod.lua  100.0%  8/8\n')
+  end)
+
+  it('exits 2 on a bad --isolate, --jobs, or --timeout', function()
+    local dir = project { ['spec/a_spec.lua'] = HEADER .. "it('passes', function() end)\n" }
+    for argv, message in pairs {
+      [{ '--isolate', 'scope' }] = '--isolate takes file or case, not "scope"',
+      [{ '-j', '0' }] = '--jobs takes a whole number above 0, not 0',
+      [{ '-j', '1.5' }] = '--jobs takes a whole number above 0, not 1.5',
+      [{ '-j', '1', '--timeout', '0' }] = '--timeout takes a whole number of ms above 0, not 0',
+      [{ '--timeout', '100' }] = '--timeout needs --isolate or --jobs',
+    } do
+      local code, out = cli(dir, argv)
+      assert.equal(code, 2, table.concat(argv, ' '))
+      assert.contains(out, message)
+    end
   end)
 end)
