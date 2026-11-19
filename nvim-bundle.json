@@ -2,7 +2,7 @@
   "dependencies": {
     "args": {
       "entry": "args",
-      "ref": "v0.1.0",
+      "ref": "v0.1.1",
       "repo": "jrop/args.nvim"
     },
     "guard": {
@@ -10,7 +10,7 @@
       "exclude": [
         "guard/vendor/test.lua"
       ],
-      "ref": "v0.2.0",
+      "ref": "v0.2.1",
       "repo": "jrop/guard.nvim"
     }
   },

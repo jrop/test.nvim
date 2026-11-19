@@ -1,24 +1,24 @@
 {
   "dependencies": {
     "args": {
-      "built_with": "0.4.0",
-      "commit": "d3f79feff8cd7c1934c1bd9307fd0832e4d7ae21",
+      "built_with": "0.5.2",
+      "commit": "523ee68e60529e981c1db2117c0a33ca6428d636",
       "entry": "args",
       "kind": "tag",
-      "ref": "v0.1.0",
-      "sha256": "b661c9d202d94c5ac8a284ead7323c8c52fe41aa090f7fba32b0450e7cc7e4a2",
+      "ref": "v0.1.1",
+      "sha256": "5901ed0316fffec92a311a55087e5cffa3ddbd05ace3daed9c942acc83478653",
       "source": "https://github.com/jrop/args.nvim"
     },
     "guard": {
-      "built_with": "0.4.1",
-      "commit": "5f6e30ec890cae037ce19595c6af6f5039a80ee7",
+      "built_with": "0.5.2",
+      "commit": "765b719c33cc8af5901040b1c34a2c278b2675bb",
       "entry": "guard",
       "exclude": [
         "guard/vendor/test.lua"
       ],
       "kind": "tag",
-      "ref": "v0.2.0",
-      "sha256": "ce2d5d43db429bac7c66f14189e8f26286e5893a87bf86879ae831cb99da1ede",
+      "ref": "v0.2.1",
+      "sha256": "568954dce467a82c9cd98beb792e461488a2f0616fd6b14a54755f48818cfb4b",
       "source": "https://github.com/jrop/guard.nvim"
     }
   },

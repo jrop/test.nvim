@@ -9,8 +9,8 @@ local guard = require 'test.vendor.guard'
 local M = {}
 
 --- @param kind string
---- @param fields table<string, Guard>
---- @return Guard
+--- @param fields table<string, guard.Guard<any>>
+--- @return guard.Guard<any>
 local function event(kind, fields)
   return guard.object(
     vim.tbl_extend('error', fields, { kind = guard.literal(kind) }),

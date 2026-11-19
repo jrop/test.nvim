@@ -11,7 +11,7 @@ emmylua_ls = "github:EmmyLuaLs/emmylua-analyzer-rust"
 [tools]
 neovim = "0.12.5"
 stylua = "2.5.2"
-"github:jrop/nvim-bundle" = "0.4.1"
+"github:jrop/nvim-bundle" = "0.5.2"
 
 [tools.emmylua_check]
 version = "0.25.1"
