@@ -50,9 +50,8 @@ end
 --- one skips the rest and the case; after-hooks run from the innermost scope
 --- outward, always.
 --- @param case test.suite.Case
---- @param path string
 --- @param emit test.executor.Emit
-local function run_case(case, path, emit)
+local function run_case(case, emit)
   local name = suite.full_name(case)
   if not case.fn then return emit { kind = 'pending', id = case.id, name = name } end
 
@@ -62,10 +61,15 @@ local function run_case(case, path, emit)
   --- @param fn fun()
   --- @return boolean
   local function attempt(fn)
-    local ok, err = suite.protect(fn, path)
+    local ok, err = suite.protect(fn)
     if not ok then errors[#errors + 1] = err end
     return ok
   end
+
+  -- Neovim reports an error raised in an autocmd callback as a message, rather
+  -- than passing it to the code that ran the autocmd, so the case would pass.
+  -- The message still lands in v:errmsg, which a failing pcall() leaves alone.
+  vim.v.errmsg = ''
 
   local scopes = scopes_of(case)
   local ready = true
@@ -79,6 +83,15 @@ local function run_case(case, path, emit)
     for _, hook in ipairs(scopes[i].after_each) do
       attempt(hook)
     end
+  end
+  -- A callback the case scheduled has not run yet. Scheduled callbacks run in
+  -- order, so once a marker scheduled now has run, every one before it has too,
+  -- and an error it raised counts against this case rather than the next.
+  local drained = false
+  vim.schedule(function() drained = true end)
+  vim.wait(1000, function() return drained end)
+  if vim.v.errmsg ~= '' then
+    errors[#errors + 1] = 'Neovim reported an error the case did not raise:\n' .. vim.v.errmsg
   end
 
   local ms = (vim.uv.hrtime() - started) / 1e6
@@ -120,7 +133,7 @@ local function run_scope(scope, path, ids, emit)
 
   local setup_err --- @type string?
   for _, hook in ipairs(scope.before_all) do
-    local ok, err = suite.protect(hook, path)
+    local ok, err = suite.protect(hook)
     if not ok then
       setup_err = ('before_all in %s failed:\n%s'):format(scope_name, err)
       break
@@ -141,13 +154,13 @@ local function run_scope(scope, path, ids, emit)
       if child.children then
         run_scope(child --[[@as test.suite.Scope]], path, ids, emit)
       elseif ids[child.id] then
-        run_case(child --[[@as test.suite.Case]], path, emit)
+        run_case(child --[[@as test.suite.Case]], emit)
       end
     end
   end
 
   for _, hook in ipairs(scope.after_all) do
-    local ok, err = suite.protect(hook, path)
+    local ok, err = suite.protect(hook)
     if not ok then
       emit {
         kind = 'fail',
@@ -173,7 +186,7 @@ function M.in_process(run, emit)
       for _, id in ipairs(file.ids) do
         ids[id] = true
       end
-      suite.with_modules(file, function() run_scope(root, file.path, ids, emit) end)
+      run_scope(root, file.path, ids, emit)
     end
   end
 end

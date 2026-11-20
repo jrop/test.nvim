@@ -35,6 +35,9 @@ function Nvim.start(opts)
   --- @type string[]
   local argv = { vim.v.progpath, unpack(coverage.argv()) }
   vim.list_extend(argv, { '--headless', '--embed', '-n', '-u', 'NORC' })
+  -- Output that runs past the screen would stop at a "-- More --" prompt that
+  -- nothing answers, and the request that printed it would never return.
+  vim.list_extend(argv, { '--cmd', 'set nomore' })
   if opts.columns then
     vim.list_extend(argv, { '--cmd', ('set columns=%d'):format(opts.columns) })
   end
@@ -78,6 +81,22 @@ function Nvim:request(method, ...) return vim.rpcrequest(self.chan, method, ...)
 --- @param ... any
 function Nvim:notify(method, ...) vim.rpcnotify(self.chan, method, ...) end
 
+-- What `run` executes in the child. The child reports an error raised in one
+-- of its own callbacks as a message instead of passing it back, so the result
+-- would look fine. The message lands in v:errmsg, though, so hand it back with
+-- the result for the host to raise, and clear it so it is reported once. A
+-- callback can also raise between runs, e.g. a WinScrolled callback after
+-- `input`, so this is not cleared before the function runs: the next run
+-- reports what happened since the last one.
+local RUN = [[
+local f = ...
+local result = assert(loadstring(f))(select(2, ...))
+local errmsg = vim.v.errmsg
+vim.v.errmsg = ''
+if result == nil then result = vim.NIL end
+return { result = result, errmsg = errmsg }
+]]
+
 --- Run a function inside the child and return its result.
 --- The function is serialized via `string.dump` - upvalues are NOT preserved,
 --- so pass the data it needs as arguments.
@@ -85,11 +104,9 @@ function Nvim:notify(method, ...) vim.rpcnotify(self.chan, method, ...) end
 --- @param ... any  arguments forwarded to `f`
 --- @return any
 function Nvim:run(f, ...)
-  return self:request(
-    'nvim_exec_lua',
-    'local f = ...; return assert(loadstring(f))(select(2, ...))',
-    { string.dump(f), ... }
-  )
+  local reply = self:request('nvim_exec_lua', RUN, { string.dump(f), ... }) --[[@as { result: any, errmsg: string }]]
+  if reply.errmsg ~= '' then error('the child reported an error: ' .. reply.errmsg, 2) end
+  return reply.result
 end
 
 --------------------------------------------------------------------------------
@@ -258,13 +275,31 @@ end
 function Nvim:stop()
   -- A child that already exited, e.g. on a second stop, has nothing to close.
   if vim.fn.jobwait({ self.chan }, 0)[1] ~= -1 then return end
+
+  -- A callback can raise after the last `run`, which would have reported it,
+  -- so read v:errmsg first. A child stuck in a busy loop never answers, and
+  -- gets the same 2000 ms that `wait_until` allows by default.
+  local reply = self:run_async(function(done) done(vim.v.errmsg) end)
+  local answered = vim.wait(2000, function() return reply.settled end, 1)
+
   -- Closing the channel makes the child exit normally, which fires its
   -- `VimLeavePre`, where a coverage run writes the child's hits; waiting
-  -- for the exit makes those hits complete before the run reads them. A child
-  -- stuck in a busy loop never reads the close, so after the same 2000 ms that
-  -- `wait_until` allows by default, it is killed without its hits.
+  -- for the exit makes those hits complete before the run reads them. A busy
+  -- child never reads the close either, so it is killed without its hits.
   vim.fn.chanclose(self.chan)
-  if vim.fn.jobwait({ self.chan }, 2000)[1] == -1 then vim.fn.jobstop(self.chan) end
+  if not answered or vim.fn.jobwait({ self.chan }, 2000)[1] == -1 then
+    -- Not `jobstop`: its SIGTERM is handled only by the child's event loop,
+    -- which a busy child never runs, and its fallback SIGKILL comes from a
+    -- timer in this process, so it never fires when this process exits first,
+    -- e.g. an isolated worker after its last case. The child would outlive
+    -- the run, spinning.
+    vim.uv.kill(vim.fn.jobpid(self.chan), 'sigkill')
+    vim.fn.jobwait({ self.chan }, 1000)
+  end
+
+  -- Raise only once the child is gone, so a failing stop does not leak it.
+  local errmsg = answered and reply.ok and reply.value or ''
+  if errmsg ~= '' then error('the child reported an error: ' .. errmsg, 2) end
 end
 
 return Nvim

@@ -131,30 +131,16 @@ function M.full_name(node)
   return table.concat(names, ' ')
 end
 
---- Format an error for the report. The message comes first; traceback frames
---- follow only when they name the spec file, because frames inside the
---- library or a bundle point at code the reader did not write.
---- @param err any
---- @param trace string
---- @param path string
---- @return string
-local function describe_error(err, trace, path)
-  local message = type(err) == 'string' and err or vim.inspect(err)
-  local frames = {}
-  for line in trace:gmatch '[^\n]+' do
-    if line:find(path, 1, true) then frames[#frames + 1] = line end
-  end
-  if #frames == 0 then return message end
-  return message .. '\n' .. table.concat(frames, '\n')
-end
-
 --- Call spec code `fn`, and return whether it succeeded and, when it did not,
---- the formatted error.
+--- the error and its full traceback. An error that is not a string is
+--- inspected, because `debug.traceback` returns a non-string message as is.
 --- @param fn function
---- @param path string
 --- @return boolean ok, string? err
-function M.protect(fn, path)
-  return xpcall(fn, function(e) return describe_error(e, debug.traceback('', 2), path) end)
+function M.protect(fn)
+  return xpcall(
+    fn,
+    function(e) return debug.traceback(type(e) == 'string' and e or vim.inspect(e), 2) end
+  )
 end
 
 --- Load one spec file and collect its tree: its root scope, and its cases by
@@ -168,7 +154,7 @@ local function collect(path)
   if not chunk then return nil, {}, load_err end
   local cases = {}
   collecting, collected = root, cases
-  local ok, err = M.protect(chunk, path)
+  local ok, err = M.protect(chunk)
   collecting, collected = nil, {}
   if not ok then return nil, {}, err end
   return root, cases, nil
@@ -180,17 +166,11 @@ end
 
 --- One spec file of a suite: its collected tree and the cases chosen from it,
 --- or why it failed to load.
----
---- A file keeps the modules its collection loaded, and puts exactly those
---- back when it runs. So a spec's top-level `local m = require 'm'` and its
---- cases' `require 'm'` share one instance, while no file's modules are
---- loaded during another file's collection or run.
 --- @class test.SuiteFile
 --- @field path string
 --- @field root? test.suite.Scope  nil when the file failed to load
 --- @field cases table<integer, test.suite.Case>  by id, from 1; none when it failed
 --- @field load_error? string
---- @field modules table<string, any>  what collecting it added to `package.loaded`
 --- @field ids integer[]  the chosen cases, in collection order
 
 --- Spec files and the cases chosen from them. Every file stays in a suite,
@@ -202,38 +182,15 @@ local Suite = {}
 Suite.__index = Suite
 M.Suite = Suite
 
---- Call `fn`, then remove every module it loaded from `package.loaded`, and
---- return them.
---- @param fn fun()
---- @return table<string, any>
-local function taking_modules(fn)
-  local before = {}
-  for name in pairs(package.loaded) do
-    before[name] = true
-  end
-  fn()
-  local taken = {}
-  for name, value in pairs(package.loaded) do
-    if not before[name] then
-      taken[name], package.loaded[name] = value, nil
-    end
-  end
-  return taken
-end
-
 --- Collect every file, in order, with all of its cases chosen.
 --- @param paths string[]
 --- @return test.Suite
 function Suite.collect(paths)
   local files = {}
   for _, path in ipairs(paths) do
-    local root, cases, err --- @type test.suite.Scope?, table<integer, test.suite.Case>, string?
-    local modules = taking_modules(function()
-      root, cases, err = collect(path)
-    end)
+    local root, cases, err = collect(path)
     local ids = vim.tbl_map(function(case) return case.id end, cases)
-    files[#files + 1] =
-      { path = path, root = root, cases = cases, load_error = err, modules = modules, ids = ids }
+    files[#files + 1] = { path = path, root = root, cases = cases, load_error = err, ids = ids }
   end
   return setmetatable({ files = files }, Suite)
 end
@@ -247,20 +204,6 @@ function Suite:select(keep)
     return vim.tbl_extend('force', file, { ids = ids })
   end, self.files)
   return setmetatable({ files = files }, Suite)
-end
-
---- Call `fn` with `file`'s modules loaded, and unload them afterward, together
---- with any module `fn` loads, so one file's module state (a cache, a
---- counter, a patched function) cannot leak into the next.
---- @param file test.SuiteFile
---- @param fn fun()
-function M.with_modules(file, fn)
-  taking_modules(function()
-    for name, value in pairs(file.modules) do
-      package.loaded[name] = value
-    end
-    fn()
-  end)
 end
 
 return M

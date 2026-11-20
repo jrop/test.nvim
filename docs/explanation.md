@@ -40,6 +40,23 @@ lets the child make progress. `drain` waits for the work queued so far. Each
 of them checks the child's state from outside, after the child has had a chance
 to change it.
 
+## Why a case fails on an error Neovim only reported
+
+Neovim does not pass every error to the code that caused it. An example of
+this is an autocmd whose callback raises:
+
+1. A case calls `nvim_exec_autocmds`, and the callback raises.
+2. Neovim prints the error and stores it in `v:errmsg`.
+3. `nvim_exec_autocmds` returns normally, so the case sees no error.
+
+The case would therefore pass while the output shows an error. The same holds
+for a callback the case schedules with `vim.schedule`, which runs after the
+case returns, and for any callback in a child Neovim, whose errors stay in the
+child. So the runner checks `v:errmsg` after each case, after running the
+callbacks the case scheduled, and `run` and `stop` check the child's. An error
+that `pcall` catches leaves `v:errmsg` alone, which is why a case can still
+test errors on purpose.
+
 ## Why every wait raises
 
 `drain`, `wait_until`, and `Pending:wait` all raise when they run out of time,
@@ -130,8 +147,10 @@ inside the library replaces all of it with `nvim -l`.
 The runner can stay small because the rest of the library already does the
 hard parts. Assertions report a failure by raising an error that already holds
 a diff, so the runner only catches errors and prints them. Each case starts
-its own child editor, so child-side state cannot leak between cases; the
-runner only resets the host side, by dropping the modules each file loaded.
+its own child editor, so child-side state cannot leak between cases. The
+runner leaves host-side state alone: a module's cache lives as long as its
+process, as it does anywhere in Lua, and a spec that needs fresh host state
+asks for a process of its own with `--isolate`.
 And waits block on `vim.wait`, which keeps the host's event loop running, so
 async work needs nothing from the runner.
 

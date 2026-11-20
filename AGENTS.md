@@ -106,17 +106,15 @@ nvim -u NONE -i NONE -l lua/test/init.lua --isolate case
   prints a list on one line.
 - **`lua/test/suite.lua`** — the tree of scopes and cases, built while a spec
   file loads, and the `Suite`, i.e., every file's tree (or load error), the
-  ids chosen from it, and the modules its collection loaded.
-  `suite:select(keep)` returns a suite with fewer chosen cases, and
-  `with_modules(file, fn)` puts a file's modules back while `fn` runs and
-  removes them after, so its top level and its cases share instances. It also
+  ids chosen from it. `suite:select(keep)` returns a suite with fewer chosen
+  cases. The runner never resets `package.loaded`; a spec that needs fresh
+  module state uses `--isolate`. It also
   owns `protect`, which formats a spec's errors for collection and running
   alike. The collecting scope is a module local.
 - **`lua/test/report.lua`** — consumes events and prints them, counting each
   outcome in the same step, and prints the summary.
 - **`lua/test/executor.lua`** — three chapters. **In process:**
-  `in_process(run, emit)` runs each file's chosen cases inside
-  `with_modules`, emitting `test.dto.Event`s: hooks outer to inner before a
+  `in_process(run, emit)` runs each file's chosen cases, emitting `test.dto.Event`s: hooks outer to inner before a
   case and inner to outer after it. It is the only code that runs cases.
   **The worker** runs one job with `in_process`. **The spawner**,
   `spawner(opts)(run, emit)`, groups each

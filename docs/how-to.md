@@ -402,6 +402,24 @@ assert.matches(err, ':%d+: empty input$')
 `raises` returns the error, so you can make further checks on it. The text is a
 plain substring; use `matches` when you need a pattern.
 
+## Report an error on purpose
+
+A case fails when Neovim reported an error during it, even one the case never
+raised. When the code under test reports an error on purpose, clear
+`vim.v.errmsg` after checking it:
+
+```lua
+it('warns about a missing file', function()
+  open_config '/does/not/exist'
+  assert.contains(vim.v.errmsg, 'no config file')
+  vim.v.errmsg = ''
+end)
+```
+
+An error that `pcall` or `raises` catches does not set `v:errmsg`, so it needs
+nothing extra. In a child, clear the child's `vim.v.errmsg` inside the same
+`nv:run`.
+
 ## Write a plugin-specific assertion
 
 Build it on `deep_equal`, and put it in your plugin's own `_test` directory:

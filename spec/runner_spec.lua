@@ -96,6 +96,58 @@ end)
     assert.matches(out, ' slow \27%[2m%(%d+ms%)\27%[0m\n')
   end)
 
+  it('fails a case when an autocmd callback it triggered raised', function()
+    local dir = project {
+      ['spec/autocmd_spec.lua'] = HEADER
+        .. [[
+vim.api.nvim_create_autocmd('User', {
+  pattern = 'Boom',
+  callback = function() error 'callback broke' end,
+})
+it('fires the autocmd', function() vim.api.nvim_exec_autocmds('User', { pattern = 'Boom' }) end)
+it('runs after it', function() end)
+]],
+    }
+    local code, out = cli(dir)
+    assert.equal(code, 1, out)
+    assert.contains(out, '  ✗ fires the autocmd\n')
+    assert.contains(out, 'callback broke')
+    assert.contains(out, '  ✓ runs after it\n')
+  end)
+
+  it('fails the case that scheduled a callback that raised, not the next one', function()
+    local dir = project {
+      ['spec/schedule_spec.lua'] = HEADER .. [[
+it('schedules a failing callback', function()
+  vim.schedule(function() error 'scheduled broke' end)
+end)
+it('runs after it', function() end)
+]],
+    }
+    local code, out = cli(dir)
+    assert.equal(code, 1, out)
+    assert.contains(out, '  ✗ schedules a failing callback\n')
+    assert.contains(out, 'scheduled broke')
+    assert.contains(out, '  ✓ runs after it\n')
+  end)
+
+  it('passes a case that raises errors on purpose, or clears the one it reported', function()
+    local dir = project {
+      ['spec/deliberate_spec.lua'] = HEADER .. [[
+it('catches its own errors', function()
+  assert.equal(pcall(vim.cmd, 'notacommand'), false)
+  assert.equal(pcall(error, 'expected'), false)
+end)
+it('reports an error on purpose', function()
+  vim.notify('expected', vim.log.levels.ERROR)
+  vim.v.errmsg = ''
+end)
+]],
+    }
+    local code, out = cli(dir)
+    assert.equal(code, 0, out)
+  end)
+
   it('exits 0 when every case passes', function()
     local dir = project {
       ['spec/ok_spec.lua'] = HEADER .. "it('passes', function() end)\n",
@@ -255,24 +307,6 @@ describe('broken', function() error 'collect broke' end)
     local code, out = cli(dir)
     assert.equal(code, 1)
     assert.contains(out, 'collect broke')
-  end)
-
-  it('drops the modules a file loaded before the next file runs', function()
-    local spec = HEADER
-      .. [[
-it('counts once', function()
-  local counter = require 'counter'
-  counter.n = counter.n + 1
-  assert.equal(counter.n, 1)
-end)
-]]
-    local dir = project {
-      ['lua/counter.lua'] = 'return { n = 0 }',
-      ['spec/a_spec.lua'] = spec,
-      ['spec/b_spec.lua'] = spec,
-    }
-    local code, out = cli(dir)
-    assert.equal(code, 0, out)
   end)
 
   it("shares a module between a file's top level and its cases", function()
@@ -544,9 +578,12 @@ pending('later')
 end)
 
 describe('isolation', function()
-  -- A report's lines without the times that slow cases print, so two runs of
-  -- the same specs compare equal.
-  local function untimed(out) return (out:gsub(' %(%d+ms%)', ''):gsub(' in [%d.]+s\n', '\n')) end
+  -- A report without what legitimately differs between two runs of the same
+  -- specs: the times that slow cases print, and the traceback frames, whose
+  -- runner frames depend on the process the case ran in.
+  local function comparable(out)
+    return (out:gsub(' %(%d+ms%)', ''):gsub(' in [%d.]+s\n', '\n'):gsub('\n\t[^\n]*', ''))
+  end
 
   it('reports the same as a run in one process, for each unit', function()
     local dir = project {
@@ -573,7 +610,7 @@ end)
     for _, argv in ipairs { { '--isolate', 'file' }, { '--isolate', 'case' }, { '-j', '1' } } do
       local isolated_code, isolated = cli(dir, argv)
       assert.equal(isolated_code, 1, table.concat(argv, ' '))
-      assert.equal(untimed(isolated), untimed(serial), table.concat(argv, ' '))
+      assert.equal(comparable(isolated), comparable(serial), table.concat(argv, ' '))
     end
   end)
 

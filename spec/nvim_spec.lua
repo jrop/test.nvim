@@ -30,6 +30,60 @@ describe('test.Nvim', function()
     assert.deep_equal(result, 'xy')
   end)
 
+  it('returns from a function whose output runs past the screen', function()
+    -- Output longer than the 12-row screen would stop at a "-- More --" prompt
+    -- that nothing answers.
+    local result = nv:run(function()
+      vim.api.nvim_echo({ { table.concat(vim.fn.range(1, 50), '\n') } }, true, {})
+      return 'done'
+    end)
+    assert.equal(result, 'done')
+  end)
+
+  it('raises when the function triggered a callback in the child that raised', function()
+    assert.raises(function()
+      nv:run(function()
+        vim.api.nvim_create_autocmd('User', {
+          pattern = 'Boom',
+          callback = function() error 'child callback broke' end,
+        })
+        vim.api.nvim_exec_autocmds('User', { pattern = 'Boom' })
+      end)
+    end, 'child callback broke')
+  end)
+
+  it('raises on the next run for a callback that raised in the child since the last one', function()
+    nv:run(function()
+      vim.schedule(function() error 'scheduled in the child' end)
+    end)
+    nv:drain()
+    assert.raises(function()
+      nv:run(function() end)
+    end, 'scheduled in the child')
+  end)
+
+  it('raises on stop for a callback that raised in the child after the last run', function()
+    local child = Nvim.start()
+    child:run(function()
+      vim.schedule(function() error 'raised before stop' end)
+    end)
+    child:drain()
+    assert.raises(function() child:stop() end, 'raised before stop')
+  end)
+
+  it('stops a child stuck in a busy loop', function()
+    local child = Nvim.start()
+    child:run(function() end)
+    -- A notification, so the host does not wait for the loop that never ends.
+    child:notify('nvim_exec_lua', 'while true do end', {})
+    local pid = vim.fn.jobpid(child.chan)
+    local started = vim.uv.hrtime()
+    child:stop()
+    assert.equal((vim.uv.hrtime() - started) / 1e6 < 4000, true, 'stop returned')
+    -- Signal 0 checks that the process exists without signalling it.
+    assert.ok(vim.uv.kill(pid, 0) == nil, 'the child outlived stop')
+  end)
+
   it('adds env to the child environment', function()
     local child = Nvim.start { env = { TEST_NVIM_SPEC = 'set' } }
     local value = child:run(function() return vim.env.TEST_NVIM_SPEC end)

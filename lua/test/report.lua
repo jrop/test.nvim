@@ -3,7 +3,7 @@
 
 --- @class test.report.Failure
 --- @field name string
---- @field message string  the error, with the traceback frames in the spec file
+--- @field message string  the error, with its traceback
 --- @field output? string  what the case printed, when it ran in a worker
 
 --- A case that takes longer than this prints its time beside its name, so the

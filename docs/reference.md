@@ -45,14 +45,13 @@ Before the run, `lua/?.lua` and `lua/?/init.lua` are prepended to
 
 Every file is loaded and collected first, in sorted order, before any case
 runs, as in mocha. A file's top-level code, and the `describe` bodies, have
-therefore run for every file by the time the first case runs. A file keeps
-the modules its collection loaded: they are removed from `package.loaded`
-after it is collected, put back while its cases run, and removed again after,
-together with any module its cases loaded. So a file's top level and its cases
-share one instance of each module, and no file sees another file's modules.
+therefore run for every file by the time the first case runs.
 
 Without `--isolate` or `--jobs`, the cases then run in this process, one file
-at a time, in sorted order.
+at a time, in sorted order. Every file therefore shares one `package.loaded`,
+as any Lua code in one process does: a module that one file requires is the
+same instance in every later file. A spec that needs fresh module state runs
+with `--isolate file` or `--isolate case`.
 
 | Exit status | Meaning |
 | --- | --- |
@@ -67,7 +66,7 @@ For each file, the runner prints the file's path, then one line per case:
 A case that took longer than 75 ms, counting its `before_each` and `after_each`
 hooks, has its time after its name, such as `✓ loads the index (120ms)`.
 After all files, it prints each failure's full name and error, followed by the
-error's traceback frames that name the spec file. In an isolated run, a
+error's full traceback. In an isolated run, a
 failure is also followed by `output:` and what was printed while it ran, when
 anything was. The last line is
 `<n> passed, <n> failed, <n> pending in <seconds>s`.
@@ -180,6 +179,16 @@ If one raises, the rest and the case itself are skipped. The `after_each`
 hooks then run from the innermost scope outward, always. Every error that a
 case or its hooks raise is reported with the case.
 
+A case also fails when Neovim reported an error during it without raising
+one, i.e. when `v:errmsg` is set once the case and its hooks have run. Before
+that check, the callbacks the case scheduled with `vim.schedule` run, so their
+errors count against the case that scheduled them. The failure reads
+`Neovim reported an error the case did not raise:` followed by the message.
+An error that `pcall` catches does not set `v:errmsg`, so a case that raises
+an error on purpose and catches it still passes. A case that reports an error
+on purpose, e.g. with `vim.notify` at `ERROR` level, passes when it clears
+`vim.v.errmsg` afterward.
+
 ## Class `test.Nvim`
 
 ### `Nvim.start(opts?)`
@@ -190,7 +199,9 @@ The child runs `nvim --headless --embed -n -u NORC` with RPC over stdio, using
 the same `nvim` binary as the host (`vim.v.progpath`). `start` then appends `opts.rtp` to the
 child's runtimepath with `set rtp+=`, and returns once the child has answered.
 Startup has already finished at that point, so the appended directory's
-`plugin/` files are not sourced.
+`plugin/` files are not sourced. The child also starts with `'more'` off,
+because output that runs past its screen would otherwise stop at a
+`-- More --` prompt that nothing answers.
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -225,6 +236,11 @@ Closes the child's channel, and waits for the child to exit. A child that has
 not exited after 2000 ms, such as one stuck in a busy loop, is killed. Calling
 it more than once is safe.
 
+Before closing the channel, `stop` reads the child's `v:errmsg`, and once the
+child is gone it raises `the child reported an error: <message>` when it is
+set. So a callback that raised after the last `run` still fails the case that
+calls `stop`, usually from an `after_each`.
+
 ### `nv:request(method, ...)`
 
 Calls the API function `method` in the child with `vim.rpcrequest`, blocks
@@ -244,6 +260,12 @@ arguments and the result cross the RPC boundary as msgpack, so they must be
 values msgpack can carry; a `nil` result arrives as `vim.NIL`, which
 `assert.is_nil` accepts. An error in `f`
 raises in the host.
+
+`run` also raises `the child reported an error: <message>` when an error was
+reported in the child without being raised: one from a callback `f`
+triggered, such as an autocmd, or from a callback that ran since the previous
+`run`, such as a `WinScrolled` callback after `nv:input`. Each such error is
+reported once.
 
 ### `nv:run_async(f)`
 
